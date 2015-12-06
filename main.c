@@ -16,9 +16,10 @@
 #define BUTTON_DEBOUNCE_INTERVAL 80  // anything quicker than this is noise: 10 ms, expressed in samples
 
 #define LEDPIN PINA4
+#define LED_R_PIN PINA4
+#define LED_G_PIN PINA3
+#define LED_B_PIN PINA2
 #define BTN1PIN PINA7
-//#define BTN2PIN 7
-// 11 is connected to Timer 2
 #define BUZZER_PIN0 PINA6
 #define BUZZER_PIN1 PINA5
 
@@ -33,18 +34,12 @@ unsigned int thisTime = 0;
 unsigned int bounceTime = 0;
 volatile int a, b, c, d;
 volatile int value;
-int col;
 int state = 1;
 #define states 9
 bool btnState = false;
 bool debouncing = false;
 
-//volatile int aTop=99;
-//volatile int aBottom=0;
-//volatile int bTop=99;
-//volatile int bBottom=0;
-
-void stopPlayback()
+void stopPlayback(void)
 {
 	// Disable playback per-sample interrupt.
 	TIMSK1 &= ~_BV(OCIE1A);
@@ -56,14 +51,13 @@ void stopPlayback()
 	// Disable the PWM timer.
 	TCCR0B &= ~_BV(CS10);
 
-	// digitalWrite(BUZZERPIN, LOW);  // necessary?
-	// set both pins low.
+	// set both buzzer pins low.
 	PORTA &= ~(_BV(BUZZER_PIN0) | _BV(BUZZER_PIN0));
 	
 }
 
 // This is called at 8000 Hz to load the next sample.
-ISR(TIMER0_COMPA_vect) {
+ISR(TIM0_OVF_vect) {
 
    switch (state) {
       case 1: 
@@ -121,20 +115,22 @@ ISR(TIMER0_COMPA_vect) {
 
     }
     
-    OCR0A = 0xff & value;  // how is '0xff & value' different from 'value'?
+    OCR1A = 0xff & value;  // how is '0xff & value' different from 'value'?
     ++t;
+
+		// prove we're interrupting: turn on green LED
+		PORTA |= _BV(LED_G_PIN);
+
 }
 
-void startPlayback()
+inline void startPlayback(void)
 {
-    // Set up Timer 1 to do pulse width modulation on the speaker
-    // pin, and Timer 0 to trigger our sample-generation code at (approximately) 8khz.
+    // Set up Timer 1 to do pulse width modulation on the speaker pin, 
+		// and Timer 0 to trigger our sample-generation code at (approximately) 8khz.
 
 		// The balloon board has a piezo btwn pins 7 & 8 (OC1A & OC1B)
 		// instead of a pin & ground.  We need to set up two inverse PWM signals
 		// on those two pins.
-
-    cli(); // disable interrupts ... 
 
 		/////////////
 		// TIMER1 (16-bit) setup:
@@ -157,6 +153,7 @@ void startPlayback()
     // Set initial pulse width to the first sample.
     // OCR1A is a 16-bit register, so we have to do this with
     // interrupts disabled to be safe ... I'm told?
+		cli();
     OCR1A = 0;
 		// 
 		// done with TIMER1
@@ -166,24 +163,7 @@ void startPlayback()
 		// Timer0 (8-bit) setup:
     // Interrupt at 8khz (1/1000 our clock)
 
-		/* NOT THIS ...
-    // Set CTC mode (Clear Timer on Compare Match) (p.133)
-    // Have to set OCR0A *after*, otherwise it gets reset to 0!
-		// WGM0* = 0100 == CTC mode. (These bits are spread across two registers)
-    TCCR0B = (TCCR0B & ~_BV(WGM03)) | _BV(WGM02);
-    TCCR0A = TCCR0A & ~(_BV(WGM01) | _BV(WGM00));
-
-		// Disable prescale ...
-		//
-    // Set the compare register (OCR0A).
-    OCR0A = F_CPU / SAMPLE_RATE;    // 16e6 / 8000 = 2000
-
-    // Enable interrupt when TCNT0 == OCR0A (p.136)
-    TIMSK0 |= _BV(OCIE0A);
-		*/
-
-		// ... BUT THIS:
-		// set normal mode & prescale to 1/1024 of clock.  This presumes our clock is 8mhz,
+		// Set normal mode & prescale to 1/1024 of clock.  This presumes our clock is 8mhz,
 		// so the interrupt is getting us somewhere close to 1khz.  A little slower.
 		// (I think one could get fancy & use 8-bit CTC mode plus a smaller prescale to tack
 		// closer to exacty 8khz, but it doesn't matter for this application.)
@@ -200,8 +180,6 @@ void startPlayback()
 
 		// Disable the other two interrupt modes on this timer:
     TIMSK0 &= ~( _BV(OCIE1A) | _BV(OCIE1B) ); 
-
-    sei();
 }
 
 /*
@@ -215,9 +193,10 @@ void blinkNTimes(int n) {
 }
 */
 
-void setup() {
+void setup(void) {
+
 		// set pinMode to output (1) on these pins, and to input (0) on the rest of port A (including BTN1PIN):
-		DDRA = _BV(LEDPIN) 
+		DDRA = _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
 			| _BV(BUZZER_PIN0) | _BV(BUZZER_PIN1)
 			// | _BV(10) // Potentiometer
 			// | _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
@@ -228,14 +207,16 @@ void setup() {
 		PORTA = _BV(BTN1PIN);
 
     startPlayback();
+		
+		// turn on blue led:
+		PORTA |= _BV(LED_B_PIN);
+
     
-    //printProg(0);
     lastTime = t;
     thisTime = t;
-    //Serial.begin(9600);   // Debugging
 }
 
-void loop() {
+void loop(void) {
 	thisTime = t;
 	if ((thisTime - lastTime) > BUTTON_PRESS_INTERVAL) { 
 		//updateScreen();
@@ -272,10 +253,14 @@ void loop() {
 			}
 		}
 	}
+	// turn on red led:
+	PORTA |= _BV(LED_R_PIN);
+
 }
 
 int main(void){
 	setup();
+	sei();
 	for(;;){
 		loop();
 	}
