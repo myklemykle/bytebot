@@ -27,6 +27,8 @@
 #define TIMER0_CTC 1
 
 // Trim our timer to 8khz by ear ...
+//#define COUNTER_TRIM 200
+// TESTING: this should be more than twice as fast as without CTC:
 #define COUNTER_TRIM 120 
 
 // button macros:
@@ -34,8 +36,7 @@
 #define BUTTON_HIGH (PINA & _BV(BUTTON_PIN))
 #define BUTTON_PRESSED (! BUTTON_HIGH)
 
-// les variables
-// for ByteBeat:
+// les variables pour ByteBeat:
 int t=0;
 volatile int a, b, c, d;
 volatile int value;
@@ -60,10 +61,11 @@ ISR(TIM0_OVF_vect) {
    switch (state) {
       case 1: 
          //value = ((t&((t>>a)))+(t|((t>>b))))&(t>>(a+1))|(t>>a)&(t*(t>>b));  
-				 // TODO: the a, b,c, d values need defining... these were pots or something on the original byteseeker.
-				 // For now, here's a state that doesn't use them.
-				 // How it's supposed to sound: http://greggman.com/downloads/examples/html5bytebeat/html5bytebeat.html
+				 // TODO: the a, b,c, d values need defining... these were pots or something on the original byteseeker,
+				 // that could be moved between the top & bottom values.
+				 // For now, here's a state that doesn't use them at all:
 				 value = ((t >> 10) & 42) * t;
+				 // How it's supposed to sound: http://greggman.com/downloads/examples/html5bytebeat/html5bytebeat.html
 
          /*aTop = 10;*/
          /*aBottom =0;*/
@@ -119,7 +121,7 @@ ISR(TIM0_OVF_vect) {
     }
     
 	  // send sample to PWM generator.
-    OCR1A = 0xff & value;  // truncate at 8 bits?  dunno why else we do this.
+    OCR1A = 0xff & value;  // truncate at 8 bits?  dunno why else we do this &ff
     ++t;
 
 		// DEBUG: prove we're interrupting: turn on green LED
@@ -161,7 +163,7 @@ inline void setupTimer1(void){
 // Timer0 (8-bit) setup:
 // Interrupt at 8khz 
 //
-// Our main system clock has a prescaler we should use first, to save batteries.
+// Our 8mhz system clock has a prescaler we should use first, to save batteries.
 // If we set that at /4, main clock is : 2mhz.
 // 
 // In normal mode, we get an interrupt on overflow, aka every 256 ticks ... that yields something in the 7.5khz range.
@@ -204,31 +206,27 @@ inline void setupTimer0(void){
 
 void setup(void) {
 
-	// balloon_pwm did this, dunno why ...
+	// alex' balloon_pwm code did this, dunno why ...
 	//wdt_disable(); 
 
-	// turn off prescaling
+	// set CPU prescaling
 	// 1: clock prescaler change enable!  (this bit on, all other bits to 0)
 	CLKPR = _BV(CLKPCE);
 	// 2: set clock prescaler to /4 (== 2mhz)
 	CLKPR = _BV(CLKPS1);
 
-	setupTimer1();
 	setupTimer0();
+	setupTimer1();
 	
 	// set pinMode to output (1) on these pins, and to input (0) on the rest of port A (including BUTTON_PIN):
 	DDRA = _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
 		| _BV(BUZZER_PIN0) | _BV(BUZZER_PIN1)
-		// | _BV(10) // Potentiometer
-		// | _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
-		// | _BV(IGNITE_PIN) //igniter
 		; 
 
 	// Enable pull-up resistor on the button pin:
 	PORTA = _BV(BUTTON_PIN);
 
 	lastTime = t;
-	thisTime = t;
 
 	PORTA |= _BV(LED_B_PIN); // DEBUG: turn on blue led to prove we're set up.
 }
