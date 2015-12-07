@@ -10,31 +10,44 @@
 #include <avr/interrupt.h>
 #include <avr/io.h>
 #include <avr/pgmspace.h>
+#include <avr/wdt.h>
 
 #define SAMPLE_RATE 8000  // hertz (each one is 1/8 ms)
-#define BUTTON_PRESS_INTERVAL 400  // minimum hold-down time: 50 ms, expressed in samples
-#define BUTTON_DEBOUNCE_INTERVAL 80  // anything quicker than this is noise: 10 ms, expressed in samples
+//#define BUTTON_PRESS_INTERVAL 400  // minimum hold-down time: 50 ms, expressed in samples
+#define BUTTON_PRESS_INTERVAL 40  // minimum hold-down time: 50 ms, expressed in samples
+//#define BUTTON_DEBOUNCE_INTERVAL 80  // anything quicker than this is noise: 10 ms, expressed in samples
+#define BUTTON_DEBOUNCE_INTERVAL 8  // anything quicker than this is noise: 10 ms, expressed in samples
 
 #define LEDPIN PINA4
 #define LED_R_PIN PINA4
 #define LED_G_PIN PINA3
 #define LED_B_PIN PINA2
-#define BTN1PIN PINA7
+#define BUTTON_PIN PINA7
 #define BUZZER_PIN0 PINA6
 #define BUZZER_PIN1 PINA5
 
-// Button is pressed if bit BTN1PIN of register PINA is 1
-#define BTN1_HIGH(reg) (reg & _BV(BTN1PIN))
-#define BTN1_PRESSED(reg) (! BTN1_HIGH(reg))
+#define TIMER0_CTC 1
 
+#define COUNTER_TRIM 120 // Tuning our timer loop close to 8khz by trial & error ...
+
+// Button is pressed if bit BUTTON_PIN of register PINA is 1
+#define BUTTON_HIGH (PINA & _BV(BUTTON_PIN))
+#define BUTTON_PRESSED (! BUTTON_HIGH)
 
 int t=0;
-unsigned int lastTime = 0;
-unsigned int thisTime = 0;
-unsigned int bounceTime = 0;
+int lastTime = 0;
+int thisTime = 0;
+int bounceTime = 0;
 volatile int a, b, c, d;
 volatile int value;
-int state = 1;
+uint8_t state = 1;
+/*int t=0;*/
+/*unsigned int lastTime = 0;*/
+/*unsigned int thisTime = 0;*/
+/*unsigned int bounceTime = 0;*/
+/*volatile int a, b, c, d;*/
+/*volatile int value;*/
+/*int state = 1;*/
 #define states 9
 bool btnState = false;
 bool debouncing = false;
@@ -57,11 +70,16 @@ void stopPlayback(void)
 }
 
 // This is called at 8000 Hz to load the next sample.
+#ifdef TIMER0_CTC
+ISR(TIM0_COMPA_vect) {
+#else
 ISR(TIM0_OVF_vect) {
+#endif
 
    switch (state) {
       case 1: 
-         value = ((t&((t>>a)))+(t|((t>>b))))&(t>>(a+1))|(t>>a)&(t*(t>>b));  
+         //value = ((t&((t>>a)))+(t|((t>>b))))&(t>>(a+1))|(t>>a)&(t*(t>>b));  
+				 value = ((t >> 10) & 42) * t;
          /*aTop = 10;*/
          /*aBottom =0;*/
          /*bTop = 14;*/
@@ -123,14 +141,12 @@ ISR(TIM0_OVF_vect) {
 
 }
 
-inline void startPlayback(void)
-{
-    // Set up Timer 1 to do pulse width modulation on the speaker pin, 
-		// and Timer 0 to trigger our sample-generation code at (approximately) 8khz.
-
+    // Set up Timer 1 to do PWM audio on the speaker pin. 
 		// The balloon board has a piezo btwn pins 7 & 8 (OC1A & OC1B)
 		// instead of a pin & ground.  We need to set up two inverse PWM signals
 		// on those two pins.
+inline void setupTimer1(void){
+
 
 		/////////////
 		// TIMER1 (16-bit) setup:
@@ -158,28 +174,43 @@ inline void startPlayback(void)
 		// 
 		// done with TIMER1
 		//////////////////
+}
+
 
 		//////////////////
 		// Timer0 (8-bit) setup:
-    // Interrupt at 8khz (1/1000 our clock)
-
-		// Set normal mode & prescale to 1/1024 of clock.  This presumes our clock is 8mhz,
-		// so the interrupt is getting us somewhere close to 1khz.  A little slower.
-		// (I think one could get fancy & use 8-bit CTC mode plus a smaller prescale to tack
-		// closer to exacty 8khz, but it doesn't matter for this application.)
+    // Interrupt at 8khz 
 		//
-		// Normal mode: disconnect OC0A&B pins.  All zeros in this register.
+		// Our main system clock has a prescaler we should use first, to save batteries.
+		// If we set that at /4, main clock is : 2mhz.
+		// 
+		// In normal mode, we get an interrupt on overflow, aka every 256 ticks.
+		// To speed that up, we could use CTC mode & trigger an interrupt every 250 ticks.
+		// That should give us 8khz ... 
+inline void setupTimer0(void){
+		// Set timer prescale: choose your own adventure!
+    // Prescale to 1/1024 of clock: 101
+		//TCCR0B = ((TCCR0B | _BV(CS02)) & ~_BV(CS01)) | _BV(CS00);
+		// Faster pussycat: /8 = 010
+    // TCCR0B = ((TCCR0B & ~_BV(CS02)) | _BV(CS01)) & ~_BV(CS00);
+		// speedy tweety: no prescaler = 001
+		TCCR0B = (TCCR0B & ~(_BV(CS02) | _BV(CS01))) | _BV(CS00);
+
+#ifdef TIMER0_CTC
+		// CTC mode, disconnect pins.
+		TCCR0A = _BV(WGM01);
+		TCCR0B &= ~_BV(WGM02);
+		// Set compare register
+		//OCR0A = COUNTER_TRIM;
+		OCR0A = 100;
+		// Enable interrupt on counter == OCR0A:
+    TIMSK0 = _BV(OCIE0A);
+#else
+		// Normal mode, disconnect OC0A&B pins.  All zeros in this register.
     TCCR0A = 0;
-
-		// TODO: I find this bit-flipping syntax really hard to read & write ... isn't there a better pattern?
-    // Prescale to 1/1024 of clock:
-    TCCR0B = ((TCCR0B | _BV(CS02)) & ~_BV(CS01)) | _BV(CS00);
-
 		// Enable interrupt on counter overflow:
-    TIMSK0 |= _BV(TOIE0);
-
-		// Disable the other two interrupt modes on this timer:
-    TIMSK0 &= ~( _BV(OCIE1A) | _BV(OCIE1B) ); 
+    TIMSK0 = _BV(TOIE0);
+#endif
 }
 
 /*
@@ -195,45 +226,54 @@ void blinkNTimes(int n) {
 
 void setup(void) {
 
-		// set pinMode to output (1) on these pins, and to input (0) on the rest of port A (including BTN1PIN):
-		DDRA = _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
-			| _BV(BUZZER_PIN0) | _BV(BUZZER_PIN1)
-			// | _BV(10) // Potentiometer
-			// | _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
-			// | _BV(IGNITE_PIN) //igniter
-			; 
+	// balloon_pwm did this, dunno why ...
+	wdt_disable(); 
 
-		// Enable pull-up resistor on the button pin:
-		PORTA = _BV(BTN1PIN);
+	// turn off prescaling
+	// 1: clock prescaler change enable!  (this bit on, all other bits to 0)
+	CLKPR = _BV(CLKPCE);
+	// 2: set clock prescaler to /4 (== 2mhz)
+	CLKPR = _BV(CLKPS1);
 
-    startPlayback();
-		
-		// turn on blue led:
-		PORTA |= _BV(LED_B_PIN);
+	setupTimer0();
+	setupTimer1();
+	
+	// set pinMode to output (1) on these pins, and to input (0) on the rest of port A (including BUTTON_PIN):
+	DDRA = _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
+		| _BV(BUZZER_PIN0) | _BV(BUZZER_PIN1)
+		// | _BV(10) // Potentiometer
+		// | _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
+		// | _BV(IGNITE_PIN) //igniter
+		; 
 
-    
-    lastTime = t;
-    thisTime = t;
+	// Enable pull-up resistor on the button pin:
+	PORTA = _BV(BUTTON_PIN);
+
+	lastTime = t;
+	thisTime = t;
+
+	PORTA |= _BV(LED_B_PIN); // DEBUG: turn on blue led to prove we're set up.
 }
 
 void loop(void) {
 	thisTime = t;
 	if ((thisTime - lastTime) > BUTTON_PRESS_INTERVAL) { 
-		//updateScreen();
+		// turn on red led to prove we're checking:
+		PORTA |= _BV(LED_R_PIN);
+
 		lastTime = thisTime;
-		//a = map(analogRead(0), 0, 1023, aBottom, aTop); 
-		//b = map(analogRead(1), 0, 1023, bBottom, bTop);   
 
 		if (!btnState) { // button wasn't pressed before.
 			// check button:
-			if (BTN1_PRESSED(PINA)) { 
+			if (BUTTON_PRESSED) { 
+				PORTA &= ~_BV(LED_G_PIN); // debug: turn off the green LED to prove we red the pin
 				// button is pressed! but is it debounced?
 				if (! debouncing ){  // not debouncing yet ...
 					debouncing = true; // start debouncing!
 					bounceTime = thisTime;
 				} else {  // already deboucing
 					if ((thisTime - bounceTime) > BUTTON_DEBOUNCE_INTERVAL) {
-						if (BTN1_PRESSED(PINA)) { 
+						if (BUTTON_PRESSED) { 
 							// button's pressed now!
 							btnState = true;
 							// debouncing used to be cool.
@@ -242,20 +282,22 @@ void loop(void) {
 							state = (state + 1) % states;
 							// blink somewhat:
 							// blinkNTimes(state+1);
+							//
+							PORTA &= ~_BV(LED_B_PIN); // debug: turn off the blue LED to prove we triggered a thing.
+
 						}
 					}
 				} // debounce
 			} // button is pressed
 
 		} else { // btnstate == true
-			if (! BTN1_PRESSED(PINA) ) { // if button is no longer pressed,
+			if (! BUTTON_PRESSED ) { // if button is no longer pressed,
 				btnState = false;     // clear button state.
+				// debug: turn green & blue back on
+				PORTA |= _BV(LED_G_PIN) | _BV(LED_B_PIN);
 			}
 		}
 	}
-	// turn on red led:
-	PORTA |= _BV(LED_R_PIN);
-
 }
 
 int main(void){
