@@ -1,9 +1,8 @@
-
 // Byteseeker Jr.
 // Adapted from Michael Smith's PCM Audio sketch on the Arduino Playground
 //
-// (From https://moderndevice.com/news/build-a-hackable-bytebeat-player-at-the-ri-mini-maker-faire/
-// Ported to Alex's balloonbot boards by mykle hansen.)
+// Adapted from https://moderndevice.com/news/build-a-hackable-bytebeat-player-at-the-ri-mini-maker-faire/ :
+// Smith's code was for an atMEGA; this attiny24A port is for Alex Norman's balloonbot boards.
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -13,10 +12,8 @@
 #include <avr/wdt.h>
 
 #define SAMPLE_RATE 8000  // hertz (each one is 1/8 ms)
-//#define BUTTON_PRESS_INTERVAL 400  // minimum hold-down time: 50 ms, expressed in samples
-#define BUTTON_PRESS_INTERVAL 40  // minimum hold-down time: 50 ms, expressed in samples
-//#define BUTTON_DEBOUNCE_INTERVAL 80  // anything quicker than this is noise: 10 ms, expressed in samples
-#define BUTTON_DEBOUNCE_INTERVAL 8  // anything quicker than this is noise: 10 ms, expressed in samples
+#define BUTTON_PRESS_INTERVAL SAMPLE_RATE/10 // minimum hold-down time: 1/10th sec
+#define BUTTON_DEBOUNCE_INTERVAL SAMPLE_RATE/100  // anything quicker than this is noise: 10 ms.
 
 #define LEDPIN PINA4
 #define LED_R_PIN PINA4
@@ -26,50 +23,34 @@
 #define BUZZER_PIN0 PINA6
 #define BUZZER_PIN1 PINA5
 
+// Use CTC mode for more accurate sample rate timer?
 #define TIMER0_CTC 1
 
-#define COUNTER_TRIM 120 // Tuning our timer loop close to 8khz by trial & error ...
+// Trim our timer to 8khz by ear ...
+#define COUNTER_TRIM 120 
 
+// button macros:
 // Button is pressed if bit BUTTON_PIN of register PINA is 1
 #define BUTTON_HIGH (PINA & _BV(BUTTON_PIN))
 #define BUTTON_PRESSED (! BUTTON_HIGH)
 
+// les variables
+// for ByteBeat:
 int t=0;
-int lastTime = 0;
-int thisTime = 0;
-int bounceTime = 0;
 volatile int a, b, c, d;
 volatile int value;
 uint8_t state = 1;
-/*int t=0;*/
-/*unsigned int lastTime = 0;*/
-/*unsigned int thisTime = 0;*/
-/*unsigned int bounceTime = 0;*/
-/*volatile int a, b, c, d;*/
-/*volatile int value;*/
-/*int state = 1;*/
 #define states 9
+
+// For button mgt:
+int lastTime;
+int thisTime;
+int bounceTime;
 bool btnState = false;
 bool debouncing = false;
 
-void stopPlayback(void)
-{
-	// Disable playback per-sample interrupt.
-	TIMSK1 &= ~_BV(OCIE1A);
-
-	// Disable the per-sample timer completely.
-	TCCR1B &= ~_BV(CS10);
-	// Q: why do we need to do both of those things?
-
-	// Disable the PWM timer.
-	TCCR0B &= ~_BV(CS10);
-
-	// set both buzzer pins low.
-	PORTA &= ~(_BV(BUZZER_PIN0) | _BV(BUZZER_PIN0));
-	
-}
-
-// This is called at 8000 Hz to load the next sample.
+// The magic of Bytebeat is all in this interrupt handler:
+// it's called at the sample rate, to generate the next byte of waveform as a function of t.
 #ifdef TIMER0_CTC
 ISR(TIM0_COMPA_vect) {
 #else
@@ -79,7 +60,11 @@ ISR(TIM0_OVF_vect) {
    switch (state) {
       case 1: 
          //value = ((t&((t>>a)))+(t|((t>>b))))&(t>>(a+1))|(t>>a)&(t*(t>>b));  
+				 // TODO: the a, b,c, d values need defining... these were pots or something on the original byteseeker.
+				 // For now, here's a state that doesn't use them.
+				 // How it's supposed to sound: http://greggman.com/downloads/examples/html5bytebeat/html5bytebeat.html
 				 value = ((t >> 10) & 42) * t;
+
          /*aTop = 10;*/
          /*aBottom =0;*/
          /*bTop = 14;*/
@@ -133,101 +118,94 @@ ISR(TIM0_OVF_vect) {
 
     }
     
-    OCR1A = 0xff & value;  // how is '0xff & value' different from 'value'?
+	  // send sample to PWM generator.
+    OCR1A = 0xff & value;  // truncate at 8 bits?  dunno why else we do this.
     ++t;
 
-		// prove we're interrupting: turn on green LED
+		// DEBUG: prove we're interrupting: turn on green LED
 		PORTA |= _BV(LED_G_PIN);
-
 }
 
-    // Set up Timer 1 to do PWM audio on the speaker pin. 
-		// The balloon board has a piezo btwn pins 7 & 8 (OC1A & OC1B)
-		// instead of a pin & ground.  We need to set up two inverse PWM signals
-		// on those two pins.
+	////////////////////////
+	// TIMER1 (16-bit) setup:
+	// Set up Timer 1 to do PWM audio on the speaker pin. 
+	// The balloon board has a piezo btwn pins 7 & 8 (OC1A & OC1B)
+	// instead of a pin & ground, so we need to set up two inverse PWM signals
+	// on those two pins.
 inline void setupTimer1(void){
+	// Set fast PWM mode
+	// WGM0[2:0] = 011
+	TCCR1A |= _BV(WGM11) | _BV(WGM10);
+	TCCR1B &= ~_BV(WGM12);
 
+	// Do non-inverting PWM on pin OC1A 
+	// COM1A* = 10 == clear OC1A on match, set on bottom.
+	TCCR1A = (TCCR1A | _BV(COM1A1)) & ~_BV(COM1A0);
 
-		/////////////
-		// TIMER1 (16-bit) setup:
-    // Set fast PWM mode
-		// WGM0[2:0] = 011
-    TCCR1A |= _BV(WGM11) | _BV(WGM10);
-    TCCR1B &= ~_BV(WGM12);
+	// Do the complement on pin OC1B:
+	// COM1B* = 11 == set OC1B on match, clear on bottom.
+	TCCR1A |= _BV(COM1B1) | _BV(COM1B0);
 
-    // Do non-inverting PWM on pin OC1A 
-		// COM1A* = 10 == clear OC1A on match, set on bottom.
-    TCCR1A = (TCCR1A | _BV(COM1A1)) & ~_BV(COM1A0);
+	// CS1* = 001 == no prescaler.
+	TCCR1B = (TCCR1B & ~(_BV(CS12) | _BV(CS11))) | _BV(CS10);
 
-		// Do the complement on pin OC1B:
-		// COM1B* = 11 == set OC1B on match, clear on bottom.
-    TCCR1A |= _BV(COM1B1) | _BV(COM1B0);
-
-		// CS1* = 001 == no prescaler.
-    TCCR1B = (TCCR1B & ~(_BV(CS12) | _BV(CS11))) | _BV(CS10);
-
-    // Set initial pulse width to the first sample.
-    // OCR1A is a 16-bit register, so we have to do this with
-    // interrupts disabled to be safe ... I'm told?
-		cli();
-    OCR1A = 0;
-		// 
-		// done with TIMER1
-		//////////////////
+	// Set initial pulse width to the first sample.
+	// OCR1A is a 16-bit register, so we have to do this with
+	// interrupts disabled to be safe ... or so I'm told?
+	cli();
+	OCR1A = 0;
 }
 
 
-		//////////////////
-		// Timer0 (8-bit) setup:
-    // Interrupt at 8khz 
-		//
-		// Our main system clock has a prescaler we should use first, to save batteries.
-		// If we set that at /4, main clock is : 2mhz.
-		// 
-		// In normal mode, we get an interrupt on overflow, aka every 256 ticks.
-		// To speed that up, we could use CTC mode & trigger an interrupt every 250 ticks.
-		// That should give us 8khz ... 
+//////////////////
+// Timer0 (8-bit) setup:
+// Interrupt at 8khz 
+//
+// Our main system clock has a prescaler we should use first, to save batteries.
+// If we set that at /4, main clock is : 2mhz.
+// 
+// In normal mode, we get an interrupt on overflow, aka every 256 ticks ... that yields something in the 7.5khz range.
+// To speed that up to 8khz, we can use CTC mode & trigger an interrupt every ~ 250 ticks (adjust by ear)
+//
 inline void setupTimer0(void){
-		// Set timer prescale: choose your own adventure!
-    // Prescale to 1/1024 of clock: 101
-		//TCCR0B = ((TCCR0B | _BV(CS02)) & ~_BV(CS01)) | _BV(CS00);
-		// Faster pussycat: /8 = 010
-    // TCCR0B = ((TCCR0B & ~_BV(CS02)) | _BV(CS01)) & ~_BV(CS00);
-		// speedy tweety: no prescaler = 001
-		TCCR0B = (TCCR0B & ~(_BV(CS02) | _BV(CS01))) | _BV(CS00);
+	// Set timer prescale: 
+	// Prescale to 1/1024 of clock: 101
+	//TCCR0B = ((TCCR0B | _BV(CS02)) & ~_BV(CS01)) | _BV(CS00);
+	// Faster pussycat: /8 = 010
+	// TCCR0B = ((TCCR0B & ~_BV(CS02)) | _BV(CS01)) & ~_BV(CS00);
+	// speedy tweety: no prescale at all = 001
+	TCCR0B = (TCCR0B & ~(_BV(CS02) | _BV(CS01))) | _BV(CS00);
 
 #ifdef TIMER0_CTC
-		// CTC mode, disconnect pins.
-		TCCR0A = _BV(WGM01);
-		TCCR0B &= ~_BV(WGM02);
-		// Set compare register
-		//OCR0A = COUNTER_TRIM;
-		OCR0A = 100;
-		// Enable interrupt on counter == OCR0A:
-    TIMSK0 = _BV(OCIE0A);
+	// CTC mode, disconnect pins.
+	TCCR0A = _BV(WGM01);
+	TCCR0B &= ~_BV(WGM02);
+	// Set compare register
+	OCR0A = COUNTER_TRIM;
+	// Enable interrupt on counter == OCR0A:
+	TIMSK0 = _BV(OCIE0A);
+
+	// NOT WORKING WTF?
+	// 
+	// Voodoo from other examples I've seen:
+	// initialize timer?
+	//TCNT0 = 0;
+	// Force a compare (jump-starts something?)
+	//TCCR0B |= _BV(FOC0A);
+	
 #else
-		// Normal mode, disconnect OC0A&B pins.  All zeros in this register.
-    TCCR0A = 0;
-		// Enable interrupt on counter overflow:
-    TIMSK0 = _BV(TOIE0);
+	// Normal mode, disconnect OC0A&B pins.  All zeros in this register.
+	TCCR0A = 0;
+	// Enable interrupt on counter overflow:
+	TIMSK0 = _BV(TOIE0);
+
 #endif
 }
-
-/*
-void blinkNTimes(int n) {
-  for (int i=0; i<n; i++) {
-    digitalWrite(LEDPIN, LOW);
-    delay(100);
-    digitalWrite(LEDPIN, HIGH);
-    delay(100);
-  }
-}
-*/
 
 void setup(void) {
 
 	// balloon_pwm did this, dunno why ...
-	wdt_disable(); 
+	//wdt_disable(); 
 
 	// turn off prescaling
 	// 1: clock prescaler change enable!  (this bit on, all other bits to 0)
@@ -235,8 +213,8 @@ void setup(void) {
 	// 2: set clock prescaler to /4 (== 2mhz)
 	CLKPR = _BV(CLKPS1);
 
-	setupTimer0();
 	setupTimer1();
+	setupTimer0();
 	
 	// set pinMode to output (1) on these pins, and to input (0) on the rest of port A (including BUTTON_PIN):
 	DDRA = _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
@@ -306,5 +284,22 @@ int main(void){
 	for(;;){
 		loop();
 	}
+}
+
+// not yet used:
+void stopPlayback(void)
+{
+	// Disable playback per-sample interrupt.
+	TIMSK1 &= ~_BV(OCIE1A);
+
+	// Disable the per-sample timer completely.
+	TCCR1B &= ~_BV(CS10);
+	// Q: why do we need to do both of those things?
+
+	// Disable the PWM timer.
+	TCCR0B &= ~_BV(CS10);
+
+	// set both buzzer pins low.
+	PORTA &= ~(_BV(BUZZER_PIN0) | _BV(BUZZER_PIN0));
 }
 
