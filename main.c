@@ -8,10 +8,10 @@
 #include <stdbool.h>
 #include <avr/interrupt.h>
 #include <avr/io.h>
+#include <avr/sleep.h>
 
+// General config settings:
 #define SAMPLE_RATE 8000  // hertz (each one is 1/8 ms)
-#define BUTTON_PRESS_INTERVAL SAMPLE_RATE/10 // minimum hold-down time: 1/10th sec
-#define BUTTON_DEBOUNCE_INTERVAL SAMPLE_RATE/100  // anything quicker than this is noise: 10 ms.
 
 #define LEDPIN PINA4
 #define LED_R_PIN PINA4
@@ -25,30 +25,46 @@
 #define TIMER0_CTC 1
 
 // Trim our timer to 8khz by ear ...
-#define COUNTER_TRIM 249
-// ... remembering that if we go below 200 or so, we start to miss interrupts.
-// TODO: tune up the interrupt handler
+#define COUNTER_TRIM 249 // works for CPU prescale /4 and timer prescale off.
 
 // button macros:
 // Button is pressed if bit BUTTON_PIN of register PINA is 1
 #define BUTTON_HIGH (PINA & _BV(BUTTON_PIN))
 #define BUTTON_PRESSED (! BUTTON_HIGH)
 
-// les variables pour ByteBeat:
-uint16_t t=0;  // the register version, for inside the interrupt
-uint16_t thisTime = 0; // the volatile version, for inside the loop.
+/////////////////////////
+// Bytebeat stuff:
+//
+// Total number of bytebeat recipes; read by ISR, changed by loop()
+#define soundStates 7
+// The current sound state:
+// (I'm making it a register 'cuz there's a sale on registers ... )
+register uint8_t soundState asm ("r4");
 
-//volatile int a, b, c, d;
-uint8_t value;
-uint8_t state = 1;
-#define states 7
+#define BUTTON_DEBOUNCE_INTERVAL SAMPLE_RATE/100  // anything quicker than this is noise: 10 ms.
+#define BUTTON_PRESS_INTERVAL SAMPLE_RATE/10 // minimum press-down time: 1/10th sec
+#define BUTTON_HOLD_INTERVAL SAMPLE_RATE 		// minimum hold-down time: 1 sec
 
 // For button mgt:
-uint16_t lastTime;
-int bounceTime;
-bool btnState = false;
-bool debouncing = false;
+// volatile (memory) copy of t; written by ISR, used by button mgt code.
+static uint16_t thisTime = 0; 
 
+/**
+ *  Our app states are:
+ *  PWROFF: no electrons in the wires.  All is silent.  We can't actually detect this state. =)
+ *  STARTING: just got power;  running setup, etc.
+ *  PLAYING: startup finished, playing a scene.
+ *  CHANGING: switching between scenes.
+ *  SLEEPING: hibernating.
+ *  ASLEEP: hibernating, waiting for a button press to wake us up.
+ */
+
+enum AppStates { PWROFF, STARTING, PLAYING, CHANGING, SLEEPING, ASLEEP };
+static enum AppStates appState = PLAYING;
+
+
+/// INTERRUPT SERVICE ROUTINES:
+//
 // The magic of Bytebeat is all in this interrupt handler:
 // it's called at the sample rate, to generate the next byte of waveform as a function of t.
 #ifdef TIMER0_CTC
@@ -56,8 +72,20 @@ ISR(TIM0_COMPA_vect) {
 #else
 ISR(TIM0_OVF_vect) {
 #endif
+	/*
+	 * TODO: this "fast" interrupt handler pushes/pops 17 registers, just because one of the 8 switchpoints
+	 * below requires that many!  Jump table instead?  Or just try other -O flags?
+	 */
 
- switch (state) {
+	uint8_t value = 0;
+	uint16_t t = thisTime;  // the register version, for inside the interrupt
+
+	if (appState == SLEEPING) {
+		thisTime = ++t; 
+		return;
+	}
+
+	switch (soundState) {
 		case 1: 
 			 //value = ((t&((t>>a)))+(t|((t>>b))))&(t>>(a+1))|(t>>a)&(t*(t>>b));  
 			 // TODO: the a, b,c, d values need defining... these were pots or something on the original byteseeker,
@@ -151,8 +179,8 @@ inline void setupTimer1(void){
 	// Set initial pulse width to the first sample.
 	// OCR1A is a 16-bit register, so we have to do this with
 	// interrupts disabled to be safe ... or so I'm told?
-	cli();
-	OCR1A = 0;
+	cli(); // try without.
+	OCR1A = 0; // try without.
 }
 
 
@@ -199,11 +227,7 @@ inline void setupTimer0(void){
 #endif
 }
 
-void setup(void) {
-
-	// alex' balloon_pwm code did this, dunno why ...
-	//wdt_disable(); 
-
+inline void setup(void) {
 	// set CPU prescaling
 	// 1: clock prescaler change enable!  (this bit on, all other bits to 0)
 	CLKPR = _BV(CLKPCE);
@@ -223,87 +247,147 @@ void setup(void) {
 	// Enable pull-up resistor on the button pin:
 	PORTA = _BV(BUTTON_PIN);
 
-	lastTime = t;
-
-	//PORTA |= _BV(LED_B_PIN); // DEBUG: turn on blue led to prove we're set up.
+	// Initialize soundState reg:
+	soundState = 1;
 }
 
+//
+// Power Mgt: pause and resume
+//
+void pause(void) {
+	cli();
+
+	// disable timers
+	TCCR1B &= ~_BV(CS10);
+	TCCR0B &= ~_BV(CS10);
+
+	// set both buzzer pins low.
+	PORTA &= ~(_BV(BUZZER_PIN0) | _BV(BUZZER_PIN0));
+	
+	// power down some pins?
+	
+	// set up wake when button is pressed
+	// (enable pin change interrupt on BUTTON_PIN (A7))
+	GIMSK |= _BV(PCIE0);   // enable pin change interrupts generally,
+	PCMSK0 |= _BV(PCINT7); // enable this pin in particular.
+	
+	// enter ('power down')
+	set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+	sleep_enable();		// enable sleep
+	sei();
+
+	sleep_cpu();			// sleep because we pressed the button.
+}
+
+
+void resume(void){
+
+	cli();
+	sleep_disable();
+	
+	// disable pin change interrupt
+	PCMSK0 = 0;
+	GIMSK &= ~_BV(PCIE0);
+
+	// power up pins?
+	// enable timers
+	TCCR0B |= _BV(CS10);
+	TCCR1B |= _BV(CS10);
+
+	sei();
+}
+
+
+//
+// Main loop.  Not interrupt-driven, not timing-critical, tho it does use
+// the timer-updated thisTime value.
+
+/**
+ * The button states are:
+ *  button is not pressed;  carry on.
+ *  button has been pressed for less than BUTTON_PRESS_INTERVAL; carry on (waiting for debounce)
+ *  button has been pressed for more than BUTTON_PRESS_INTERVAL, but less than BUTTON_HOLD_INTERVAL.  
+ *  button has been held down longer than BUTTON_HOLD_INTERVAL
+ */
+enum ButtonStates { OFF, DEBOUNCING, PRESSED, HELD };
+
 void loop(void) {
-	if ((thisTime - lastTime) > BUTTON_PRESS_INTERVAL) { 
-		// turn on red led to prove we're checking:
-		//PORTA |= _BV(LED_R_PIN);
+	static uint16_t pressTime = 0;
 
-		lastTime = thisTime;
+	static enum ButtonStates btnState = OFF;
 
-		if (!btnState) { // button wasn't pressed before.
-			// check button:
-			if (BUTTON_PRESSED) { 
-				//PORTA &= ~_BV(LED_G_PIN); // debug: turn off the green LED to prove we red the pin
-				// button is pressed! but is it debounced?
-				if (! debouncing ){  // not debouncing yet ...
-					debouncing = true; // start debouncing!
-					bounceTime = thisTime;
-				} else {  // already deboucing
-					if ((thisTime - bounceTime) > BUTTON_DEBOUNCE_INTERVAL) {
-						if (BUTTON_PRESSED) { 
-							// button's pressed now!
-							btnState = true;
-							// debouncing used to be cool.
-							debouncing = false;
-							// skip forward one state:
-							state = (state + 1) % states;
-							// blink somewhat:
-							// blinkNTimes(state+1);
-							//
-							//PORTA &= ~_BV(LED_B_PIN); // debug: turn off the blue LED to prove we triggered a thing.
+	// Hi.  I'm a finite state machine.
 
-						}
+	if (BUTTON_PRESSED) {
+		switch(btnState) {
+			case OFF: 
+				// changed state!
+				btnState = DEBOUNCING;
+				pressTime = thisTime;
+				break;
+			case DEBOUNCING: 
+				if (thisTime - pressTime > BUTTON_PRESS_INTERVAL) {
+					// changed state!
+					btnState = PRESSED;
+					// Do a trick:
+					switch(appState) {
+						case PLAYING:
+							appState = CHANGING;
+							soundState = (soundState + 1) % soundStates;
+							break;
+						case SLEEPING:
+							// state change!
+							appState = PLAYING;
+							// do a trick!
+							resume();
+							break;
 					}
-				} // debounce
-			} // button is pressed
-
-		} else { // btnstate == true
-			if (! BUTTON_PRESSED ) { // if button is no longer pressed,
-				btnState = false;     // clear button state.
-				// debug: turn green & blue back on
-				//PORTA |= _BV(LED_G_PIN) | _BV(LED_B_PIN);
-			}
+					appState = PLAYING;
+				} 
+				break;
+			case PRESSED: 
+				if (thisTime - pressTime > BUTTON_HOLD_INTERVAL) {
+					// changed state!
+					btnState = HELD;
+					// Do a trick:
+					if (appState != SLEEPING) {
+						appState = SLEEPING;
+						pause();
+					}
+				}
+				break;
+			default: 
+				// Nothing has changed;
+				break;
+		}
+	} else { // ! BUTTON_PRESSED
+		if (btnState != OFF) {
+			// changed state!
+			btnState = OFF;
 		}
 	}
 }
 
-int main(void){
+void main(void){
 	cli();
 	setup();
-
-	// DEBUG: check some other things:
-	if (
-		//	(TIM0_COMPA_vect != 0x0009) || 
-			(OCIE0A != 1) 
-		 ) {
-				PORTA |= _BV(LED_G_PIN) | _BV(LED_B_PIN);
-	}
-
 	sei();
 	for(;;){
 		loop();
 	}
 }
 
-// not yet used:
-void stopPlayback(void)
-{
-	// Disable playback per-sample interrupt.
-	TIMSK1 &= ~_BV(OCIE1A);
 
-	// Disable the per-sample timer completely.
-	TCCR1B &= ~_BV(CS10);
-	// Q: why do we need to do both of those things?
-
-	// Disable the PWM timer.
-	TCCR0B &= ~_BV(CS10);
-
-	// set both buzzer pins low.
-	PORTA &= ~(_BV(BUZZER_PIN0) | _BV(BUZZER_PIN0));
-}
-
+///
+// TODO:
+//
+// The sleep/wake logic is tricky.  I'm using this loop that uses timer0 to time
+// time the button stuff, but I don't get timer0 while asleep.  The pin-change
+// interrupt is triggered when I press & again when I release, and it's a bit
+// bouncy.  
+// Look into the hardware debounce stuff!  Save some time there.
+// Look into using the WDT to wake instead of the pin change interrupt,
+// and then timing the button down stuff.
+//
+// MEANWHILE: how to get better sound?  That's going to really really really matter, yo.
+// Turn a box into a sprung membrane ...
