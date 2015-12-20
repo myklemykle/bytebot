@@ -148,8 +148,7 @@ ISR(TIM0_OVF_vect) {
 	}
 	
 	// send sample to PWM generator.
-	//OCR1A = 0xff & value;  // truncate at 8 bits?  dunno why else we do this &ff
-	OCR1A = value;  // uint8_t motherfucker!
+	OCR1AL = value;
 	thisTime = ++t;
 }
 
@@ -161,9 +160,14 @@ ISR(TIM0_OVF_vect) {
 	// on those two pins.
 inline void setupTimer1(void){
 	// Set fast PWM mode
-	// WGM0[2:0] = 011
-	TCCR1A |= _BV(WGM11) | _BV(WGM10);
-	TCCR1B &= ~_BV(WGM12);
+	// WGM0[3:0] = 0101
+	TCCR1A = (TCCR1A | _BV(WGM11)) &  ~_BV(WGM10);
+	TCCR1B = (TCCR1B | _BV(WGM13)) & ~_BV(WGM12);
+
+	// EXPERIMENT: Phase-correct PWM mode ... any audible diff? WGM* = 0001
+	// TCCR1B &= ~(_BV(WGM13) | _BV(WGM12));  /// Yes, sounds crap.
+	// ... that's weird.  I don't see why it would be so different, but it loses all low freqs.
+	// This sounds like the bug I had before.
 
 	// Do non-inverting PWM on pin OC1A 
 	// COM1A* = 10 == clear OC1A on match, set on bottom.
@@ -176,11 +180,13 @@ inline void setupTimer1(void){
 	// CS1* = 001 == no prescaler.
 	TCCR1B = (TCCR1B & ~(_BV(CS12) | _BV(CS11))) | _BV(CS10);
 
-	// Set initial pulse width to the first sample.
-	// OCR1A is a 16-bit register, so we have to do this with
-	// interrupts disabled to be safe ... or so I'm told?
-	cli(); // try without.
-	OCR1A = 0; // try without.
+	// " The FOC1A/FOC1B bits are only active when the WGM1[3:0] bits specifies a non-PWM mode. 
+	// However, for ensuring compatibility with future devices, these bits must be set to zero 
+	// when TCCR1A is written when operating in a PWM mode."
+	// ... okay whatever dude.
+	TCCR1C = 0;
+
+	OCR1AH = 0; // clear the top 8 bits of this register & never touch them again.
 }
 
 
