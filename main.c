@@ -25,7 +25,8 @@
 #define TIMER0_CTC 1
 
 // Trim our timer to 8khz by ear ...
-#define COUNTER_TRIM 249 // works for CPU prescale /4 and timer prescale off.
+//#define COUNTER_TRIM 249 // works for CPU prescale /4 and timer prescale off.
+#define COUNTER_TRIM 255 // works for CPU prescale /4 and timer prescale off.
 
 // button macros:
 // Button is pressed if bit BUTTON_PIN of register PINA is 1
@@ -36,7 +37,8 @@
 // Bytebeat stuff:
 //
 // Total number of bytebeat recipes; read by ISR, changed by loop()
-#define soundStates 7
+#define SOUNDSTATES 14
+#define INIT_SOUNDSTATE 6;
 // The current sound state:
 // (I'm making it a register 'cuz there's a sale on registers ... )
 register uint8_t soundState asm ("r4");
@@ -69,6 +71,7 @@ static enum AppStates appState = PLAYING;
 // it's called at the sample rate, to generate the next byte of waveform as a function of t.
 #ifdef TIMER0_CTC
 ISR(TIM0_COMPA_vect) {
+	// TODO: try to use timer1 for this.
 #else
 ISR(TIM0_OVF_vect) {
 #endif
@@ -77,60 +80,65 @@ ISR(TIM0_OVF_vect) {
 	 * below requires that many!  Jump table instead?  Or just try other -O flags?
 	 */
 
-	uint8_t value = 0;
+	uint16_t value = 0;
 	uint16_t t = thisTime;  // the register version, for inside the interrupt
 
 	if (appState == SLEEPING) {
-		thisTime = ++t; 
+		thisTime = ++t;
 		return;
 	}
 
 	switch (soundState) {
-		case 1: 
-			 //value = ((t&((t>>a)))+(t|((t>>b))))&(t>>(a+1))|(t>>a)&(t*(t>>b));  
-			 // TODO: the a, b,c, d values need defining... these were pots or something on the original byteseeker,
-			 // that could be moved between the top & bottom values.
-			 // For now, here's a state that doesn't use them at all:
+		case 0: 
 			 value = ((t >> 10) & 42) * t;
 			 // How it's supposed to sound: http://greggman.com/downloads/examples/html5bytebeat/html5bytebeat.html
-
-			 /*aTop = 10;*/
-			 /*aBottom =0;*/
-			 /*bTop = 14;*/
-			 /*bBottom = 0;*/
 			 break;
-		case 2: 
-			 value =(t*(t>>5|t>>8))>>(t>>16); 
-			 /*aTop = 10;*/
-			 /*aBottom =0;*/
-			 /*bTop = 16;*/
-			 /*bBottom = 0;*/
+		case 1:
+			//value = t*(t>>11&t>>8&123&t>>3);  
+			value = t*(t>>11&t>>8 & 0b01100011 &t>>3);  // 0b01100011 is a little less hectic than 123
+			break;
+		case 2:
+			//value = t*5&(t>>7)|t*3&(t*4>>10); /// very xmassy!  kind of sweet.
+			value = t*5&(t>>7)|t*3&(t>>8); /// same thing ...
 			 break;
 		case 3:
-			value = t*(t>>11&t>>8&123&t>>3);
-			 /*aTop = 6;*/
-			 /*aBottom =0;*/
-			 /*bTop = 50;*/
-			 /*bBottom = 0;*/
-			break;
+			//value = (t>>7|t|t>>6)*10+ (4*(t*t>>13|t>>6) ); // disco techno?
+			value = (t>>7|t|t>>6)*10+ ((t*t>>13|t>>6) <<2 ); // same thing ...
+			 break;
 		case 4:
-			value = t*5&(t>>7)|t*3&(t*4>>10);
-			 /*aTop = 22;*/
-			 /*aBottom =0;*/
-			 /*bTop = 99;*/
-			 /*bBottom = 0;*/
+			// value = ((t*("36364689"[t>>13&7]&15))/12&128) + (((((t>>12)^(t>>12)-2)%11*t)/4|t>>13)&127); // designed for 44khz
+			//
+			//value = ( ((t*("36364689"[t>>11&7]&15))/12&128)  + (( (((t>>9)^(t>>9)-2)%11*t) >>2|t>>13)&127) ) << 2; // 8khz version
+			// needs optimization ...
+			value = ( ((t*("36364689"[t>>11&7]&15)) &128)  + (( (((t>>9)^(t>>9)-2)%11*t) >>2|t>>13)&127) ) << 2; // 8khz version
 			 break;
 		case 5:
-			value = (t>>7|t|t>>6)*10+4*(t*t>>13|t>>6);
-			 /*aTop = 24; aBottom = 0; bTop = 8; bBottom = 0;*/
+			 value = (t<<1 & 0x80); // 8khz.
 			 break;
 		case 6:
-			value = ((t*(t>>8|t>>9)&46&t>>8))^(t&t>>13|t>>6);
-			 /*aTop = 10; aBottom = 0; bTop = 28; bBottom = 0;*/
+			 //value = t<<(t>>13 & 7) & 0x80;
+			 value = (t<<1 ); // 8khz.
 			 break;
 		case 7:
-			value = ((t*("36364689"[t>>13&7]&15))/12&128) + (((((t>>12)^(t>>12)-2)%11*t)/4|t>>13)&127);
-			 /*aTop = 8; aBottom = 0; bTop = 32; bBottom = 0;*/
+			 value = (t<<2 ); // 8khz.
+			 break;
+		case 8:
+			 value = (t<<3 ); // 8khz.
+			 break;
+		case 9:
+			 value = (t<<4 ); // 8khz.
+			 break;
+		case 10:
+			 value = (t<<5 ); // 8khz.
+			 break;
+		case 11:
+			 value = (t<<6 ); // 8khz.
+			 break;
+		case 12:
+			 value = (t<<7 ); // 8khz.
+			 break;
+		case 13:
+			 value = 128; // 8khz.
 			 break;
 		/*case 8:*/
 			 /*value = (t>>a|t|t>>(t>>16))*b+((t>>(b+1))&(a+1));   */
@@ -144,11 +152,10 @@ ISR(TIM0_OVF_vect) {
 			 /*value = ((t>>32)*7|(t>>a)*8|(t>>b)*7)&(t>>7);   */
 			 /*[>aTop = 8; aBottom = 0; bTop = 22; bBottom = 0;<]*/
 			 /*break; */
-
 	}
 	
 	// send sample to PWM generator.
-	OCR1AL = value;
+	OCR1AL = value & 0xff;
 	thisTime = ++t;
 }
 
@@ -161,8 +168,8 @@ ISR(TIM0_OVF_vect) {
 inline void setupTimer1(void){
 	// Set fast PWM mode
 	// WGM0[3:0] = 0101
-	TCCR1A = (TCCR1A | _BV(WGM11)) &  ~_BV(WGM10);
-	TCCR1B = (TCCR1B | _BV(WGM13)) & ~_BV(WGM12);
+	TCCR1A = (TCCR1A | _BV(WGM10)) &  ~_BV(WGM11);
+	TCCR1B = (TCCR1B | _BV(WGM12)) & ~_BV(WGM13);
 
 	// EXPERIMENT: Phase-correct PWM mode ... any audible diff? WGM* = 0001
 	// TCCR1B &= ~(_BV(WGM13) | _BV(WGM12));  /// Yes, sounds crap.
@@ -254,7 +261,10 @@ inline void setup(void) {
 	PORTA = _BV(BUTTON_PIN);
 
 	// Initialize soundState reg:
-	soundState = 1;
+	soundState = INIT_SOUNDSTATE;
+
+	// green means go:
+	PORTA &= ~_BV(LED_G_PIN);
 }
 
 //
@@ -339,7 +349,7 @@ void loop(void) {
 					switch(appState) {
 						case PLAYING:
 							appState = CHANGING;
-							soundState = (soundState + 1) % soundStates;
+							soundState = (soundState + 1) % SOUNDSTATES;
 							break;
 						case SLEEPING:
 							// state change!
