@@ -22,7 +22,6 @@
 #define BUZZER_PIN1 PINA5
 
 // Use CTC mode for more accurate sample rate timer?
-#define TIMER0_CTC 1
 
 // Trim our timer to 8khz by ear ...
 //#define COUNTER_TRIM 249 // works for CPU prescale /4 and timer prescale off.
@@ -38,7 +37,7 @@
 //
 // Total number of bytebeat recipes; read by ISR, changed by loop()
 #define SOUNDSTATES 14
-#define INIT_SOUNDSTATE 6;
+#define INIT_SOUNDSTATE 0;
 // The current sound state:
 // (I'm making it a register 'cuz there's a sale on registers ... )
 register uint8_t soundState asm ("r4");
@@ -69,12 +68,12 @@ static enum AppStates appState = PLAYING;
 //
 // The magic of Bytebeat is all in this interrupt handler:
 // it's called at the sample rate, to generate the next byte of waveform as a function of t.
-#ifdef TIMER0_CTC
-ISR(TIM0_COMPA_vect) {
-	// TODO: try to use timer1 for this.
-#else
-ISR(TIM0_OVF_vect) {
-#endif
+//
+ISR(TIM1_OVF_vect) { 
+	//... with cpu@ 2mhz, counting to 256, this should be happening at 8khz.  But if the
+	//PWM is also happening that slow, that might be the cause of my weird whine ...
+	//if so, I could take cpu to 4 or 8khz (to increase PWM cycles per interrupt)
+	//and put counter in 9 or 10 bit Fast PWM (to decrease interrupts per cpu cycle at the same rate).
 	/*
 	 * TODO: this "fast" interrupt handler pushes/pops 17 registers, just because one of the 8 switchpoints
 	 * below requires that many!  Jump table instead?  Or just try other -O flags?
@@ -194,50 +193,9 @@ inline void setupTimer1(void){
 	TCCR1C = 0;
 
 	OCR1AH = 0; // clear the top 8 bits of this register & never touch them again.
-}
 
-
-//////////////////
-// Timer0 (8-bit) setup:
-// Interrupt at 8khz 
-//
-// Our 8mhz system clock has a prescaler we should use first, to save batteries.
-// If we set that at /4, main clock is : 2mhz.
-// 
-// In normal mode, we get an interrupt on overflow, aka every 256 ticks ... that yields something in the 7.5khz range.
-// To speed that up to 8khz, we can use CTC mode & trigger an interrupt every ~ 250 ticks (adjust by ear)
-//
-inline void setupTimer0(void){
-	// Set timer prescale: 
-	// Prescale to 1/1024 of clock: 101
-	//TCCR0B = ((TCCR0B | _BV(CS02)) & ~_BV(CS01)) | _BV(CS00);
-	// Faster pussycat: /8 = 010
-	// TCCR0B = ((TCCR0B & ~_BV(CS02)) | _BV(CS01)) & ~_BV(CS00);
-	// speedy tweety: no prescale at all = 001
-	//TCCR0B = (TCCR0B & ~(_BV(CS02) | _BV(CS01))) | _BV(CS00);
-
-#ifdef TIMER0_CTC
-	// Set compare register
-	OCR0A = COUNTER_TRIM;
-	// CTC mode, disconnect pins.
-	TCCR0A = _BV(WGM01);
-	// Clear interrupt flag (why?)
-	// TIFR0 |= _BV(OCF0A);
-	// Enable interrupt on counter == OCR0A:
-	TIMSK0 = _BV(OCIE0A);
-
-	// Set prescale (none) & start timer
-	// Clearing cs02 & cs01, setting cs00
-	TCCR0B = (TCCR0B & ~(_BV(CS02) | _BV(CS01 | _BV(WGM02)))) | _BV(CS00); 
-
-#else
-	// Normal mode, disconnect OC0A&B pins.  All zeros in this register.
-	TCCR0A = 0;
-	// Enable interrupt on counter overflow:
-	TIMSK0 = _BV(TOIE0);
-	// Set prescale & start timer
-	TCCR0B = (TCCR0B & ~(_BV(CS02) | _BV(CS01))) | _BV(CS00); 
-#endif
+	// Enable interrupt on TIMER1 overflow
+	TIMSK1 |= _BV(TOIE1);
 }
 
 inline void setup(void) {
@@ -250,7 +208,6 @@ inline void setup(void) {
 	//CLKPR = 0; // /0
 
 	setupTimer1();
-	setupTimer0();
 	
 	// set pinMode to output (1) on these pins, and to input (0) on the rest of port A (including BUTTON_PIN):
 	DDRA = _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
@@ -262,6 +219,9 @@ inline void setup(void) {
 
 	// Initialize soundState reg:
 	soundState = INIT_SOUNDSTATE;
+
+	// calibrate CPU clock.
+	OSCCAL = 0x71;
 
 	// green means go:
 	PORTA &= ~_BV(LED_G_PIN);
