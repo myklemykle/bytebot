@@ -70,20 +70,32 @@ static enum AppStates appState = PLAYING;
 // it's called at the sample rate, to generate the next byte of waveform as a function of t.
 //
 ISR(TIM1_OVF_vect) { 
-	//... with cpu@ 2mhz, counting to 256, this should be happening at 8khz.  But if the
-	//PWM is also happening that slow, that might be the cause of my weird whine ...
-	//if so, I could take cpu to 4 or 8khz (to increase PWM cycles per interrupt)
-	//and put counter in 9 or 10 bit Fast PWM (to decrease interrupts per cpu cycle at the same rate).
 	/*
 	 * TODO: this "fast" interrupt handler pushes/pops 17 registers, just because one of the 8 switchpoints
 	 * below requires that many!  Jump table instead?  Or just try other -O flags?
 	 */
 
+	// At 8mhz clock speed we call this interrupt 4 times as often as we need to,
+	// so we skip doing any work 3 out of 4 times.  That way, our PWM generating
+	// freq is 32khz, beyond human hearing -- eliminating an unpleasant hi-frequency aliasing effect --
+	// while our sample output rate remains 8khz (1/4 * 32khz), the bytebeat standard.
+	//
+	// For that, we need a 2-bit counter:
+	static uint8_t timeBits = 0;
+
 	uint16_t value = 0;
 	uint16_t t = thisTime;  // the register version, for inside the interrupt
 
+	timeBits++;
+	if (timeBits == 3) {
+		t++;
+		timeBits = 0;
+	} else {
+		return;
+	}
+
 	if (appState == SLEEPING) {
-		thisTime = ++t;
+		thisTime = t;
 		return;
 	}
 
@@ -155,7 +167,7 @@ ISR(TIM1_OVF_vect) {
 	
 	// send sample to PWM generator.
 	OCR1AL = value & 0xff;
-	thisTime = ++t;
+	thisTime = t;
 }
 
 	////////////////////////
@@ -169,6 +181,14 @@ inline void setupTimer1(void){
 	// WGM0[3:0] = 0101
 	TCCR1A = (TCCR1A | _BV(WGM10)) &  ~_BV(WGM11);
 	TCCR1B = (TCCR1B | _BV(WGM12)) & ~_BV(WGM13);
+
+	// 9-bit fast PWM mode: WGM0* = 0110
+	//TCCR1A = (TCCR1A | _BV(WGM11)) &  ~_BV(WGM10);
+	//TCCR1B = (TCCR1B | _BV(WGM12)) & ~_BV(WGM13);
+	//
+	// 10-bit fast PWM mode: WGM0* = 0111
+	// TCCR1A |= (_BV(WGM11) | _BV(WGM10));
+	// TCCR1B = (TCCR1B | _BV(WGM12)) & ~_BV(WGM13);
 
 	// EXPERIMENT: Phase-correct PWM mode ... any audible diff? WGM* = 0001
 	// TCCR1B &= ~(_BV(WGM13) | _BV(WGM12));  /// Yes, sounds crap.
@@ -202,10 +222,10 @@ inline void setup(void) {
 	// set CPU prescaling
 	// 1: clock prescaler change enable!  (this bit on, all other bits to 0)
 	CLKPR = _BV(CLKPCE);
-	// 2: set clock prescaler to /4 (== 2mhz)
-	CLKPR = _BV(CLKPS1); // /4
-	//CLKPR = _BV(CLKPS0); // /2
-	//CLKPR = 0; // /0
+	// 2: set clock prescaler
+	//CLKPR = _BV(CLKPS1); // /4 (2mhz)
+	// CLKPR = _BV(CLKPS0); // /2 (4mhz)
+	CLKPR = 0; // /0 (8mhz)
 
 	setupTimer1();
 	
@@ -221,7 +241,7 @@ inline void setup(void) {
 	soundState = INIT_SOUNDSTATE;
 
 	// calibrate CPU clock.
-	OSCCAL = 0x71;
+	OSCCAL = 0x31;
 
 	// green means go:
 	PORTA &= ~_BV(LED_G_PIN);
