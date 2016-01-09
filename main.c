@@ -1,8 +1,15 @@
-// Byteseeker Jr.
-// Adapted from Michael Smith's PCM Audio sketch on the Arduino Playground
+////////////////////////
+//
+// Beatbot!  A pocket-sized byteboom beatbox!
+// Rotates between different bytebeat melodies -- http://canonical.org/~kragen/bytebeat/
 //
 // Evolved from & inspired by https://moderndevice.com/news/build-a-hackable-bytebeat-player-at-the-ri-mini-maker-faire/ :
-// Smith's code was for an atMEGA with knobs; this attiny24A port is for Alex Norman's balloon-bot boards.
+// Empowered by Alex Norman's generous donation of hardware.
+// (Smith's code was for an atMEGA with knobs; this attiny24A port is for Alex Norman's balloon-bot boards.)
+// Assisted by Jared Boone, Paul Stoffregen & others.
+// Audio code adapted from Michael Smith's PCM Audio sketch on the Arduino Playground.
+//
+// 2015/2016 -mykle hansen-
 
 #include <stdint.h>
 #include <stdbool.h>
@@ -13,7 +20,7 @@
 // General config settings:
 #define SAMPLE_RATE 8000  // hertz (each one is 1/8 ms)
 
-#define LEDPIN PINA4
+// Which pins do what?
 #define LED_R_PIN PINA4
 #define LED_G_PIN PINA3
 #define LED_B_PIN PINA2
@@ -21,7 +28,7 @@
 #define BUZZER_PIN0 PINA6
 #define BUZZER_PIN1 PINA5
 
-// LED macros:
+// RGBLED on/off macros:
 #define RED_ON PORTA |= _BV(LED_R_PIN)
 #define GREEN_ON PORTA |= _BV(LED_G_PIN)
 #define BLUE_ON PORTA |= _BV(LED_B_PIN)
@@ -29,61 +36,55 @@
 #define GREEN_OFF	PORTA &= ~_BV(LED_G_PIN)
 #define BLUE_OFF	PORTA &= ~_BV(LED_B_PIN)
 
-/////////////////////////
-// Bytebeat stuff:
+
+
+///////////////////////////////
 //
-// Total number of bytebeat recipes; read by ISR, changed by checkButton()
-#define SOUNDSTATES 13
-#define INIT_SOUNDSTATE 0;
-// The current sound state:
-// (I'm making it a register 'cuz there's a sale on registers ... )
-register uint8_t soundState asm ("r4");
-
-// volatile (memory) copy of t; incremented by ISR, used by button mgt code.
-static uint16_t thisTime = 0; 
-
-/**
- *  Our app states are:
- *  PWROFF: no electrons in the wires.  All is silent.  We can't actually detect this state.
- *  STARTING: just got power;  running setup, etc.
- *  PLAYING: startup finished, playing a scene.
- *  CHANGING: switching between scenes.
- *  SLEEPING: hibernating.
- *  ASLEEP: hibernating, waiting for a button press to wake us up.
- */
-
-enum AppStates { PWROFF, STARTING, PLAYING, CHANGING, SLEEPING, ASLEEP };
-static enum AppStates appState = PLAYING;
-
-/// INTERRUPT SERVICE ROUTINES:
+// Time management:
+// This is our master clock, 'time', incremented at 8khz by the ISR below.  We output one sample for every increment.
 //
-// This ISR is called at timer overflow, to increment the 't' variable (time) used by bytebeat algorithms.
+uint16_t time = 0; 
+
+// This ISR is called at timer1 overflow, to increment the 'time' variable used by bytebeat algorithms.
+// At 8mhz clock speed we call this interrupt at 32khz -- 4 times as often as we need to increment the clock,
+// so we 'manually prescale' by skipping work 3 out of every 4 times.  We do this so our PWM generating
+// freq is beyond human hearing at 32khz, avoiding an unpleasant hi-frequency aliasing effect,
+// while our sample output rate remains 8khz (1/4 * 32khz), the bytebeat standard.
 //
 ISR(TIM1_OVF_vect) { 
-	// At 8mhz clock speed we call this interrupt 4 times as often as we need to do anything,
-	// so we skip doing any work 3 out of 4 times.  We "manually prescale" so that our PWM generating
-	// freq is 32khz, beyond human hearing -- eliminating an unpleasant hi-frequency aliasing effect --
-	// while our sample output rate remains 8khz (1/4 * 32khz), the bytebeat standard.
-	//
 	// For manual prescaling, we need a 2-bit counter:
 	static uint8_t timeBits = 0;
 	// NOTE: If we get really desperate for memory, this could maybe be done with timer0 instead.
 
 	if (timeBits == 3) {
 		timeBits = 0;
-		thisTime++;
+		time++;
 	} 
 	timeBits++;
-
 }
 
-// The magic of Bytebeat: producing an audio sample as a (simple) function of time.
+/////////////////////////
+// Bytebeat stuff:
+//
+// Bytebeat is a genre of simple algorthims that convert time (t) into an audio sample.
+//
+// Total number of bytebeat recipes in our tiny brain:
+#define SOUNDSTATES 13
+//
+// The recipe we play at power-on:
+#define INIT_SOUNDSTATE 0;
+//
+// The currently selected recipe:
+// (I'm making it a register 'cuz there's a sale on registers ... )
+register uint8_t soundState asm ("r4");
+//
+// genSample is called at 8khz, to produce an audio sample as a (simple) function of time
+// via the currently selected recipe.
 void genSample(){
 
 	uint16_t value = 0;
-	uint16_t t = thisTime;  // local register/nonvolatile version, for faster math (we hope)
+	uint16_t t = time;  // local register/nonvolatile version, for faster math (we hope)
 
-	// We detect a clock tick. Do a new sample!
 	switch (soundState) {
 		case 0: 
 			 value = ((t >> 10) & 42) * t;
@@ -149,18 +150,49 @@ void genSample(){
 			 /*break; */
 	}
 	
-	// adjust pulse width of PWM generator to generate the new sample:
+	// adjust the pulse width of the timer1 PWM generator to generate the new sample as PWM volts:
 	OCR1AL = value & 0xff;
 }
 
-
 ////////////////////////
-// TIMER1 (16-bit) setup:
+// 
+// Setup/initialization at boot:
+//
+inline void setup(void) {
+	// Set CPU prescaling
+	// 1: clock prescaler change enable!  (this bit on, all other bits to 0)
+	CLKPR = _BV(CLKPCE);
+	// 2: set clock prescaler
+	//CLKPR = _BV(CLKPS1); // /4 (2mhz)
+	// CLKPR = _BV(CLKPS0); // /2 (4mhz)
+	CLKPR = 0; // /0 (8mhz)
+
+	setupTimer1();
+	
+	// set pinMode to output (1) on these pins, and to input (0) on the rest of port A (including BUTTON_PIN):
+	DDRA = _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
+		| _BV(BUZZER_PIN0) | _BV(BUZZER_PIN1)
+		; 
+
+	// Enable pull-up resistor on the button pin:
+	PORTA = _BV(BUTTON_PIN);
+
+	// Initialize soundState reg:
+	soundState = INIT_SOUNDSTATE;
+
+	// calibrate CPU clock. (trial and error and ear.)
+	OSCCAL = 0x31;
+}
+
+////////////////////////////////
+//
+// Timer1 configuration at boot:
+//
 // Set up Timer 1 to do PWM audio on the speaker pin. 
 // The balloon board has a piezo btwn pins 7 & 8 (OC1A & OC1B)
-// instead of a pin & ground, so we need to set up two inverse PWM signals
+// instead of a pin & ground, so we set up two inverse PWM signals
 // on those two pins.
-// Also trigger an intererupt on overflow.
+// Also trigger an intererupt on overflow, to drive our clock.
 inline void setupTimer1(void){
 	// Set fast PWM mode
 	// WGM0[3:0] = 0101
@@ -198,32 +230,6 @@ inline void setupTimer1(void){
 	TIMSK1 |= _BV(TOIE1);
 }
 
-inline void setup(void) {
-	// set CPU prescaling
-	// 1: clock prescaler change enable!  (this bit on, all other bits to 0)
-	CLKPR = _BV(CLKPCE);
-	// 2: set clock prescaler
-	//CLKPR = _BV(CLKPS1); // /4 (2mhz)
-	// CLKPR = _BV(CLKPS0); // /2 (4mhz)
-	CLKPR = 0; // /0 (8mhz)
-
-	setupTimer1();
-	
-	// set pinMode to output (1) on these pins, and to input (0) on the rest of port A (including BUTTON_PIN):
-	DDRA = _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
-		| _BV(BUZZER_PIN0) | _BV(BUZZER_PIN1)
-		; 
-
-	// Enable pull-up resistor on the button pin:
-	PORTA = _BV(BUTTON_PIN);
-
-	// Initialize soundState reg:
-	soundState = INIT_SOUNDSTATE;
-
-	// calibrate CPU clock. (trial and error and ear.)
-	OSCCAL = 0x31;
-}
-
 ///////////////////////////////
 //
 // Power Mgt: pause and resume
@@ -231,14 +237,16 @@ inline void setup(void) {
 void pause(void) {
 	cli();
 
-	// disable timers
+	// disable timer1
 	TCCR1B &= ~_BV(CS10);
+	// disable timer0
 	// TCCR0B &= ~_BV(CS10);
 
 	// set both buzzer pins low.
 	PORTA &= ~(_BV(BUZZER_PIN0) | _BV(BUZZER_PIN0));
 	
 	// power down some pins?
+	RED_OFF; GREEN_OFF; BLUE_OFF;
 	
 	// set up wake when button is pressed
 	// (enable pin change interrupt on BUTTON_PIN (A7))
@@ -263,15 +271,26 @@ void pause(void) {
 
 	// power up pins?
 
-	// enable timers
+	// enable timer0
 	// TCCR0B |= _BV(CS10);
+	// enable timer1
 	TCCR1B |= _BV(CS10);
 
 	sei();
 }
 
+/**
+ *  Our app states are:
+ *  PLAYING: startup finished, playing a scene.
+ *  SLEEPING: hibernating.
+ */
+
+enum AppStates { PWROFF, STARTING, PLAYING, CHANGING, SLEEPING, ASLEEP };
+static enum AppStates appState = PLAYING;
+
 
 ///////////////////////////////////////
+//
 // Button mgt.  
 // Normal press & release advances the sound state
 // Holding down for longer that BUTTON_HOLD_INTERVAL puts us to sleep,
@@ -281,29 +300,31 @@ void pause(void) {
 // the button is pressed if bit BUTTON_PIN of register PINA is 1
 #define BUTTON_PRESSED (PINA & _BV(BUTTON_PIN))
 
-// states the button can be in:
-enum ButtonStates { OFF, PRESSED, HELD};
+// the states the button can be in:
+enum ButtonStates { OFF, PRESSED };
 static enum ButtonStates buttonState = OFF;
 
 // How long has the button been in its current state?
 static uint16_t buttonTime = 0;
 
-
-///////////////////
+//
 // Debounce the button.
 //
-// This bit-shift debounce routine came from this enjoyable, nerdy article: 
+// Bit-shift debounce algorithm from this enjoyable, nerdy article: 
 // http://www.eng.utah.edu/~cs5780/debouncing.pdf -- A Guide To Debouncing, by Jack Ganssle
-// This determines how many bits of the result we care about; we OR it to set all the other bits to 1.
+// Basically we don't believe the button until it says the same thing N times in a row.  Here, N = 12.
+//
+// This determines how many bits of the result we care about (13); we OR it to set all the other bits to 1.
 #define DEBOUNCE_MASK 0b1110000000000000
-// This is the value that represents a debounced "down"/"closed"/"pressed" state: twelve consecutive zeroes after a one
+// This is the value that represents a debounced "down"/"closed"/"pressed" state: 12 consecutive zeroes after a one
 #define DEBOUNCE_PRESSED 0b1111000000000000
-// This is the value that represents a debounced "up" state: twelve consecutive ones after a zero
+// This is the value that represents a debounced "up" state: 12 consecutive ones after a zero
 #define DEBOUNCE_RELEASED 0b1110111111111111
 
-// Called "periodically" ... To divide approx 50ms debounce time by 12 samples, 
-// call every 4 ms; 'thisTime' ticks at 8khz (8 times per ms) so 
-// every 4 ms == ever 32 ticks.
+// sampleButton() is called periodically, adjusted to spread the 12 debouncing samples over the
+// button's observed bounce time.  (You did hook your button to an oscilloscope and press
+// it over and over for three hours, didn't you?  Well, Jack Ganssle did ... he says 50-100ms is good.)
+//
 void sampleButton(void){
 	static uint16_t State = 0;
 	
@@ -312,28 +333,26 @@ void sampleButton(void){
 	if (State == DEBOUNCE_PRESSED) { 
 		buttonState = PRESSED;
 		buttonPressed();
-		// green means go:
 	} else if (State == DEBOUNCE_RELEASED) {
 		buttonState = OFF;
 		buttonReleased();
 	}
 }
 
-// called once when button is pressed
+// Called once when button is pressed
 void buttonPressed(void){
-	buttonTime = thisTime;
+	buttonTime = time;
 	// if we were asleep, wake up!
 	if (appState == SLEEPING) {
 		appState = PLAYING;
 	}
 }
 
-// called once when button is released
+// Called once when button is released
 void buttonReleased(void){
-	buttonTime = thisTime;
+	buttonTime = time;
 	// If we're sleeping, go back to sleep
 	if (appState == SLEEPING) {
-		BLUE_ON;
 		pause();
 	// Otherwise, advance the sound state.
 	} else {
@@ -341,12 +360,12 @@ void buttonReleased(void){
 	}
 }
 
-// called when t advances.
+// Called when t advances.
 void twiddle(void){
 	// if the button has been held down for BUTTON_HOLD_INTERVAL, go to sleep.
 	if (buttonState == PRESSED) {
 		
-		if (thisTime - buttonTime > BUTTON_HOLD_INTERVAL) {
+		if (time - buttonTime > BUTTON_HOLD_INTERVAL) {
 			GREEN_ON;
 			appState = SLEEPING;
 			pause();
@@ -368,7 +387,7 @@ void main(void){
 	setup();
 	sei();
 	for(;;){
-		t = thisTime;
+		t = time;
 
 		// Check for clock ticks; if the clock has moved, generate a sample.
 		if (lastTime != t) {
