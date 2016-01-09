@@ -16,6 +16,7 @@
 #include <avr/interrupt.h>
 #include <avr/io.h>
 #include <avr/sleep.h>
+#include <avr/wdt.h>
 
 // General config settings:
 #define SAMPLE_RATE 8000  // hertz (each one is 1/8 ms)
@@ -36,7 +37,19 @@
 #define GREEN_OFF	PORTA &= ~_BV(LED_G_PIN)
 #define BLUE_OFF	PORTA &= ~_BV(LED_B_PIN)
 
+// Handy bit macros from http://www.avrfreaks.net/comment/26024#comment-26024 :
+#define bit_get(p,m) ((p) & (m))
+#define bit_set(p,m) ((p) |= (m))
+#define bit_clear(p,m) ((p) &= ~(m))
+#define bit_flip(p,m) ((p) ^= (m))
+#define bit_write(c,p,m) (c ? bit_set(p,m) : bit_clear(p,m))
 
+// States our application can be in:
+//  PLAYING: startup finished, playing a scene.
+//  SLEEPING: low-power hibernation, waiting to be woken by a button press.
+
+enum AppStates { PWROFF, STARTING, PLAYING, CHANGING, SLEEPING, ASLEEP };
+static enum AppStates appState = PLAYING;
 
 ///////////////////////////////
 //
@@ -54,7 +67,7 @@ uint16_t time = 0;
 ISR(TIM1_OVF_vect) { 
 	// For manual prescaling, we need a 2-bit counter:
 	static uint8_t timeBits = 0;
-	// NOTE: If we get really desperate for memory, this could maybe be done with timer0 instead.
+	// NOTE: If we get really desperate for memory, this could maybe be done with TIMER0 instead.
 
 	if (timeBits == 3) {
 		timeBits = 0;
@@ -96,7 +109,7 @@ void genSample(){
 			break;
 		case 2:
 			//value = t*5&(t>>7)|t*3&(t*4>>10); /// very xmassy!  kind of sweet.
-			value = t*5&(t>>7)|t*3&(t>>8); /// t*4>>10 and t>>8 should be the same thing ...
+			value = (t*5&(t>>7)) | (t*3&(t>>8)); /// t*4>>10 and t>>8 should be the same thing ...
 			 break;
 		case 3:
 			//value = (t>>7|t|t>>6)*10+ (4*(t*t>>13|t>>6) ); // disco techno?
@@ -159,16 +172,20 @@ void genSample(){
 // Setup/initialization at boot:
 //
 inline void setup(void) {
-	// Set CPU prescaling
+	// Set CPU prescaling (two steps)
 	// 1: clock prescaler change enable!  (this bit on, all other bits to 0)
 	CLKPR = _BV(CLKPCE);
-	// 2: set clock prescaler
+	// 2: actually change the clock prescale value
 	//CLKPR = _BV(CLKPS1); // /4 (2mhz)
 	// CLKPR = _BV(CLKPS0); // /2 (4mhz)
 	CLKPR = 0; // /0 (8mhz)
 
+	// configure main clock
 	setupTimer1();
-	
+
+	// configure watchdog for sleep/wake
+	setupWatchdog();
+
 	// set pinMode to output (1) on these pins, and to input (0) on the rest of port A (including BUTTON_PIN):
 	DDRA = _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
 		| _BV(BUZZER_PIN0) | _BV(BUZZER_PIN1)
@@ -227,66 +244,8 @@ inline void setupTimer1(void){
 	OCR1AH = 0; // clear the top 8 bits of this register & never touch them again.
 
 	// Enable interrupt on TIMER1 overflow
-	TIMSK1 |= _BV(TOIE1);
+	bit_set(TIMSK1, _BV(TOIE1));
 }
-
-///////////////////////////////
-//
-// Power Mgt: pause and resume
-//
-void pause(void) {
-	cli();
-
-	// disable timer1
-	TCCR1B &= ~_BV(CS10);
-	// disable timer0
-	// TCCR0B &= ~_BV(CS10);
-
-	// set both buzzer pins low.
-	PORTA &= ~(_BV(BUZZER_PIN0) | _BV(BUZZER_PIN0));
-	
-	// power down some pins?
-	RED_OFF; GREEN_OFF; BLUE_OFF;
-	
-	// set up wake when button is pressed
-	// (enable pin change interrupt on BUTTON_PIN (A7))
-	GIMSK |= _BV(PCIE0);   // enable pin change interrupts generally,
-	PCMSK0 |= _BV(PCINT7); // enable this pin in particular.
-	
-	// enter ('power down')
-	set_sleep_mode(SLEEP_MODE_PWR_DOWN);
-	sleep_enable();		// enable sleep
-	sei();
-
-	sleep_cpu();			// sleep because we pressed the button.
-
-	// zzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzzz
-
-	cli();
-	sleep_disable();
-	
-	// disable pin change interrupt
-	PCMSK0 = 0;
-	GIMSK &= ~_BV(PCIE0);
-
-	// power up pins?
-
-	// enable timer0
-	// TCCR0B |= _BV(CS10);
-	// enable timer1
-	TCCR1B |= _BV(CS10);
-
-	sei();
-}
-
-/**
- *  Our app states are:
- *  PLAYING: startup finished, playing a scene.
- *  SLEEPING: hibernating.
- */
-
-enum AppStates { PWROFF, STARTING, PLAYING, CHANGING, SLEEPING, ASLEEP };
-static enum AppStates appState = PLAYING;
 
 
 ///////////////////////////////////////
@@ -314,10 +273,10 @@ static uint16_t buttonTime = 0;
 // http://www.eng.utah.edu/~cs5780/debouncing.pdf -- A Guide To Debouncing, by Jack Ganssle
 // Basically we don't believe the button until it says the same thing N times in a row.  Here, N = 12.
 //
-// This determines how many bits of the result we care about (13); we OR it to set all the other bits to 1.
-#define DEBOUNCE_MASK 0b1110000000000000
+// This masks how many bits of the result we care about (13); we OR it to set all the other bits to 1.
+#define DEBOUNCE_MASK     0b1110000000000000
 // This is the value that represents a debounced "down"/"closed"/"pressed" state: 12 consecutive zeroes after a one
-#define DEBOUNCE_PRESSED 0b1111000000000000
+#define DEBOUNCE_PRESSED  0b1111000000000000
 // This is the value that represents a debounced "up" state: 12 consecutive ones after a zero
 #define DEBOUNCE_RELEASED 0b1110111111111111
 
@@ -370,14 +329,130 @@ void twiddle(void){
 			appState = SLEEPING;
 			pause();
 		} else { 
-			GREEN_OFF;
+			//GREEN_OFF;
 		}
 	} else {
-		RED_OFF;
-		GREEN_OFF;
+		//RED_OFF;
+		//GREEN_OFF;
 	}
 
 }
+
+///////////////////////////////
+//
+// Power Mgt: 
+//
+// Watchdog timer macros:
+#define WDT_ENABLE() WDTCSR |= _BV(WDIE)
+#define WDT_DISABLE() WDTCSR &= ~_BV(WDIE)
+#define WDT_RESET() __asm__ __volatile__ ("wdr")
+
+// pause() is called at sleep.  It turns off everything that we can turn off & puts us in a coma,
+// to be wakened someday by a watchdog interrupt.
+// resume() is called at wakeup, and un-does whatever pause() did.
+//
+void pause(void) {
+	cli();
+
+	// disable timer1
+	TCCR1B &= ~_BV(CS10);
+
+	// set both buzzer pins low.
+	PORTA &= ~(_BV(BUZZER_PIN0) | _BV(BUZZER_PIN0));
+	
+	// power down some pins?
+	//RED_OFF; GREEN_OFF; BLUE_OFF;
+	
+	// Enable watchdog timer interrupt mode
+	WDT_ENABLE();
+	
+	// enter ('power down')
+	set_sleep_mode(SLEEP_MODE_PWR_DOWN);
+	sleep_enable();		// enable sleep
+	sei(); 						// Allows watchdog interrupt to happen. (?)
+
+	sleep_cpu();			// sleep because we pressed the button.
+
+	// WAKEUP EXECUTION RESUMES HERE!
+}
+
+void resume(void){
+
+	cli();
+	sleep_disable();
+	
+	// disable watchdog
+	WDT_DISABLE();
+
+	// power up pins?
+
+	// enable timer1
+	TCCR1B |= _BV(CS10);
+
+	sei();
+}
+
+
+// Configure the watchdog timer at startup -- but don't turn it on yet.
+void setupWatchdog(void){
+	uint8_t state = 0;
+	// Watchdog should be disabled by default, but just to be sure: disable watchdog. (WDE == 0, WDIE == 0)
+	// watchdog trigger rate: every 16ms (WDP* == 0000);
+	bit_clear(state, _BV(WDE) | _BV(WDP3) | _BV(WDP2) | _BV(WDP1) | _BV(WDP0) | _BV(WDIE));
+	
+	// The Magic Watchdog Configuration Change Happy Dance:
+	// All changes must be written with WDCE = 0
+	state &= ~_BV(WDCE);
+	cli();
+	WDT_RESET();
+	bit_clear(MCUSR, _BV(WDRF));
+	bit_set(WDTCSR, _BV(WDCE) | _BV(WDE));
+	// You have four cycles to complete your changes. Good luck!
+	WDTCSR = state;
+	sei();
+}
+
+//
+// This ISR is polled by the watchdog when we're sleeping.  
+// It wakes us back up once the button has been released and then re-pressed.
+// It uses a simplified version of the button debounce function that
+// we use when awake: it's called less often, watches fewer bits & detects only
+//
+// This determines how many bits of the result we care about (13); we OR it to set all the other bits to 1.
+#define WDT_DEBOUNCE_MASK     0b11100000
+#define WDT_DEBOUNCE_PRESSED  0b11110000
+#define WDT_DEBOUNCE_RELEASED 0b11101111
+
+// TODO: why aren't i getting this from io.h????
+// 
+#define WDT_vect_num  4
+#define WDT_vect      _VECTOR(4)  /* Watchdog Time-out */
+
+ISR(WDT_vect) {
+	static uint8_t buttonPinState = 0;
+	
+	buttonPinState = (buttonPinState <<1) | ( BUTTON_PRESSED ? 1 : 0 ) | WDT_DEBOUNCE_MASK;
+
+	if (buttonState == PRESSED && (buttonPinState == WDT_DEBOUNCE_RELEASED)) {
+		buttonState = OFF;
+	} else if (buttonState == OFF && (buttonPinState == WDT_DEBOUNCE_PRESSED)) { 
+		// Wake from sleep!
+		appState = PLAYING;
+		// Do the rest:
+		resume();
+	}
+
+	// Re-enable interrupt mode with every ISR call, or we turn into a reset.
+	// The Magic Watchdog Configuration Change Happy Dance ...
+	cli();
+	WDT_RESET();
+	bit_clear(MCUSR, _BV(WDRF));
+	bit_set(WDTCSR, _BV(WDCE) | _BV(WDE));
+	WDTCSR = (WDTCSR | _BV(WDIE)) & ~_BV(WDE); // interrupt on, reset off
+	sei();
+	
+}
+
 
 void main(void){
 	static uint16_t lastTime;
@@ -395,7 +470,7 @@ void main(void){
 			lastTime = t;
 
 			// Sample the button every 4 ms == every 32 ticks of T 
-			if (t & 64 == 64) {
+			if ((t & 64) == 64) {
 				sampleButton();
 			}
 
