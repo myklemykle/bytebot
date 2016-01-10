@@ -86,7 +86,7 @@ ISR(TIM1_OVF_vect) {
 // Bytebeat is a genre of simple algorthims that convert time (t) into an audio sample.
 //
 // Total number of bytebeat recipes in our tiny brain:
-#define SOUNDSTATES 13
+#define SOUNDSTATES 8
 //
 // The recipe we play at power-on:
 #define INIT_SOUNDSTATE 0;
@@ -102,38 +102,43 @@ register uint8_t value asm ("r6");
 void genSample(){
 	uint32_t t = masterTime;  // local register/nonvolatile version, for faster math (we hope)
 
+	// memory savings: precompute some constants that appear in many different formulae:
+	uint32_t trr7  = t>>7;  
+	uint32_t trr8  = t>>8;  
+	uint32_t trr11 = t>>11;  
+	uint32_t trr13 = t>>13;  
+
 	switch (soundState) {
 		case 0: 
-			 value = ((t >> 10) & 42) * t;
-			 // How it's supposed to sound: http://greggman.com/downloads/examples/html5bytebeat/html5bytebeat.html
-			 break;
+			value = ((t >> 10) & 42) * t;
+			// How it's supposed to sound: http://greggman.com/downloads/examples/html5bytebeat/html5bytebeat.html
+			break;
 		case 1:
 			//value = t*(t>>11&t>>8&123&t>>3);  
-			value = t*(t>>11&t>>8 & 0b01100011 &t>>3);  // 0b01100011 is a little less hectic than 123
+			value = t*(trr11&trr8 & 0b01100011 &t>>3);  // 0b01100011 is a little less hectic than 123
 			break;
 		case 2:
-			//value = t*5&(t>>7)|t*3&(t*4>>10); /// very xmassy!  kind of sweet.
-			value = (t*5&(t>>7)) | (t*3&(t>>8)); /// t*4>>10 and t>>8 should be the same thing ...
-			 break;
+			//value = t*5&(trr7)|t*3&(t*4>>10); /// very xmassy!  kind of sweet.
+			value = (t*5&(trr7)) | (t*3&(trr8)); /// t*4>>10 and trr8 should be the same thing ...
+			break;
 		case 3:
-			//value = (t>>7|t|t>>6)*10+ (4*(t*t>>13|t>>6) ); // disco techno?
-			value = (t>>7|t|t>>6)*10 + ((t*t>>13|t>>6)<<2 ); // x << 2 and x * 4 should be the same thing ...
-			 break;
+			//value = (trr7|t|t>>6)*10+ (4*(t*t>>13|t>>6) ); // disco techno?
+			value = (trr7|t|t>>6)*10 + ((t*trr13|t>>6)<<2 ); // x << 2 and x * 4 should be the same thing ...
+			break;
 		case 4:
 			// value = ((t*("36364689"[t>>13&7]&15))/12&128) + (((((t>>12)^(t>>12)-2)%11*t)/4|t>>13)&127); // designed for 44khz
-			value = ( ((t*("36364689"[t>>11&7]&15))/12&128)  + (( (((t>>9)^(t>>9)-2)%11*t) >>2|t>>13)&127) ) << 2; // 8khz version
-			 break;
+			value = ( ((t*("36364689"[trr11&7]&15))/12&128)  + (( (((t>>9)^(t>>9)-2)%11*t) >>2|trr13)&127) ) << 2; // 8khz version
+			break;
 		case 5:
-			 //value = (t*(9+(t/131072%2))*(t>33e3) & t>>4 | t*(5+(t/32768%2)) & t>>7 | t*(3+(t/65536%2)) & (t>32768)&t>>11)-(t>97e3);
-			 //value = (t*(9+(t>>17%2))*(t>33e3) & t>>4 | t*(5+(t>15%2)) & t>>7 | t*(3+(t>>16%2)) & (t>32768)&t>>11)-(t>97e3);
-			 break;
+			value = ( 0xFEFE % ( t>>9 | 11 ) & t ) ;
+			break;
 		case 6:
-			 //value = t<<(t>>13 & 7) & 0x80;
-			 value = (t<<1 ); // 8khz.
-			 break;
+			value = ((t<<1)^((t<<1)+(trr7)&t>>12))|t>>(4-(1&(t>>19)))|trr7;
+			break;
 		case 7:
-			 value = (t<<2 ); // 8khz.
+			 value = t*6&((trr8|t<<4)) ^ t*4&((trr7|t<<3)) ^ t*2&((t>>6|t<<2));
 			 break;
+			 /*
 		case 8:
 			 value = (t<<3 ); // 8khz.
 			 break;
@@ -149,23 +154,11 @@ void genSample(){
 		case 12:
 			 value = (t<<7 ); // 8khz.
 			 break;
-			 /* Can't do this one without an exponent operator:
+			 // Can't do this one without an exponent operator:
 		case 13:
 			 value = ( (t*(1.059 ^ (1 + (t>>12 & 11)) )<<( 1 + (t>>14 & 3))) * ( (t >> 10 & t>>13 | t >> 9) & 1) & 128) *1.99;
 			 break;
 			 */
-		/*case 8:*/
-			 /*value = (t>>a|t|t>>(t>>16))*b+((t>>(b+1))&(a+1));   */
-			 /*[>aTop = 12; aBottom = 0; bTop = 20; bBottom = 0;<]*/
-			 /*break;*/
-		/*case 9:*/
-			 /*value = ((t*(t>>a|t>>(a+1))&b&t>>8))^(t&t>>13|t>>6);   */
-			 /*[>aTop = 16; aBottom = 0; bTop = 86; bBottom = 0;<]*/
-			 /*break;*/
-		/*case 10:*/
-			 /*value = ((t>>32)*7|(t>>a)*8|(t>>b)*7)&(t>>7);   */
-			 /*[>aTop = 8; aBottom = 0; bTop = 22; bBottom = 0;<]*/
-			 /*break; */
 	}
 	
 	// adjust the pulse width of the timer1 PWM generator to generate the new sample as PWM volts:
