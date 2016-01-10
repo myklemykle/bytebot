@@ -30,12 +30,12 @@
 #define BUZZER_PIN1 PINA5
 
 // RGBLED on/off macros:
-#define RED_ON PORTA |= _BV(LED_R_PIN)
-#define GREEN_ON PORTA |= _BV(LED_G_PIN)
-#define BLUE_ON PORTA |= _BV(LED_B_PIN)
-#define RED_OFF	PORTA &= ~_BV(LED_R_PIN)
-#define GREEN_OFF	PORTA &= ~_BV(LED_G_PIN)
-#define BLUE_OFF	PORTA &= ~_BV(LED_B_PIN)
+#define RED_ON() PORTA |= _BV(LED_R_PIN)
+#define GREEN_ON() PORTA |= _BV(LED_G_PIN)
+#define BLUE_ON() PORTA |= _BV(LED_B_PIN)
+#define RED_OFF()	PORTA &= ~_BV(LED_R_PIN)
+#define GREEN_OFF()	PORTA &= ~_BV(LED_G_PIN)
+#define BLUE_OFF()	PORTA &= ~_BV(LED_B_PIN)
 
 // Handy bit macros from http://www.avrfreaks.net/comment/26024#comment-26024 :
 #define bit_get(p,m) ((p) & (m))
@@ -48,15 +48,18 @@
 //  PLAYING: startup finished, playing a scene.
 //  SLEEPING: low-power hibernation, waiting to be woken by a button press.
 
-enum AppStates { PWROFF, STARTING, PLAYING, CHANGING, SLEEPING, ASLEEP };
-static enum AppStates appState = PLAYING;
+#define PLAYING 0
+#define SLEEPING 1
+register uint8_t appState asm("r17");
+//enum AppStates { PWROFF, STARTING, PLAYING, CHANGING, SLEEPING, ASLEEP };
+//static enum AppStates appState = PLAYING;
 
 ///////////////////////////////
 //
 // Time management:
 // This is our master clock, 'time', incremented at 8khz by the ISR below.  We output one sample for every increment.
 //
-uint16_t time = 0; 
+uint32_t masterTime = 0; 
 
 // This ISR is called at timer1 overflow, to increment the 'time' variable used by bytebeat algorithms.
 // At 8mhz clock speed we call this interrupt at 32khz -- 4 times as often as we need to increment the clock,
@@ -64,14 +67,15 @@ uint16_t time = 0;
 // freq is beyond human hearing at 32khz, avoiding an unpleasant hi-frequency aliasing effect,
 // while our sample output rate remains 8khz (1/4 * 32khz), the bytebeat standard.
 //
+// For manual prescaling, we need a 2-bit counter:
+register uint8_t timeBits asm("r5");
+
 ISR(TIM1_OVF_vect) { 
-	// For manual prescaling, we need a 2-bit counter:
-	static uint8_t timeBits = 0;
 	// NOTE: If we get really desperate for memory, this could maybe be done with TIMER0 instead.
 
 	if (timeBits == 3) {
 		timeBits = 0;
-		time++;
+		masterTime++;
 	} 
 	timeBits++;
 }
@@ -93,10 +97,10 @@ register uint8_t soundState asm ("r4");
 //
 // genSample is called at 8khz, to produce an audio sample as a (simple) function of time
 // via the currently selected recipe.
-void genSample(){
+register uint8_t value asm ("r6");
 
-	uint16_t value = 0;
-	uint16_t t = time;  // local register/nonvolatile version, for faster math (we hope)
+void genSample(){
+	uint32_t t = masterTime;  // local register/nonvolatile version, for faster math (we hope)
 
 	switch (soundState) {
 		case 0: 
@@ -113,14 +117,15 @@ void genSample(){
 			 break;
 		case 3:
 			//value = (t>>7|t|t>>6)*10+ (4*(t*t>>13|t>>6) ); // disco techno?
-			value = (t>>7|t|t>>6)*10+ ((t*t>>13|t>>6) <<2 ); // x << 2 and x * 4 should be the same thing ...
+			value = (t>>7|t|t>>6)*10 + ((t*t>>13|t>>6)<<2 ); // x << 2 and x * 4 should be the same thing ...
 			 break;
 		case 4:
 			// value = ((t*("36364689"[t>>13&7]&15))/12&128) + (((((t>>12)^(t>>12)-2)%11*t)/4|t>>13)&127); // designed for 44khz
 			value = ( ((t*("36364689"[t>>11&7]&15))/12&128)  + (( (((t>>9)^(t>>9)-2)%11*t) >>2|t>>13)&127) ) << 2; // 8khz version
 			 break;
 		case 5:
-			 value = (t<<1 & 0x80); // 8khz.
+			 //value = (t*(9+(t/131072%2))*(t>33e3) & t>>4 | t*(5+(t/32768%2)) & t>>7 | t*(3+(t/65536%2)) & (t>32768)&t>>11)-(t>97e3);
+			 //value = (t*(9+(t>>17%2))*(t>33e3) & t>>4 | t*(5+(t>15%2)) & t>>7 | t*(3+(t>>16%2)) & (t>32768)&t>>11)-(t>97e3);
 			 break;
 		case 6:
 			 //value = t<<(t>>13 & 7) & 0x80;
@@ -164,7 +169,7 @@ void genSample(){
 	}
 	
 	// adjust the pulse width of the timer1 PWM generator to generate the new sample as PWM volts:
-	OCR1AL = value & 0xff;
+	OCR1AL = value;
 }
 
 ////////////////////////
@@ -260,8 +265,8 @@ inline void setupTimer1(void){
 #define BUTTON_PRESSED (PINA & _BV(BUTTON_PIN))
 
 // the states the button can be in:
-enum ButtonStates { OFF, PRESSED };
-static enum ButtonStates buttonState = OFF;
+enum ButtonStates { RELEASED, PRESSED };
+static enum ButtonStates buttonState = RELEASED;
 
 // How long has the button been in its current state?
 static uint16_t buttonTime = 0;
@@ -290,32 +295,20 @@ void sampleButton(void){
 	State = (State <<1) | ( BUTTON_PRESSED ? 1 : 0 ) | DEBOUNCE_MASK;
 
 	if (State == DEBOUNCE_PRESSED) { 
+
 		buttonState = PRESSED;
-		buttonPressed();
-	} else if (State == DEBOUNCE_RELEASED) {
-		buttonState = OFF;
-		buttonReleased();
-	}
-}
+		buttonTime = (masterTime & 0xffff);
+		// if we were asleep, wake up!
+		if (appState == SLEEPING) {
+			appState = PLAYING;
+		}
 
-// Called once when button is pressed
-void buttonPressed(void){
-	buttonTime = time;
-	// if we were asleep, wake up!
-	if (appState == SLEEPING) {
-		appState = PLAYING;
-	}
-}
+	} else if (buttonState == PRESSED && State == DEBOUNCE_RELEASED) {
 
-// Called once when button is released
-void buttonReleased(void){
-	buttonTime = time;
-	// If we're sleeping, go back to sleep
-	if (appState == SLEEPING) {
-		pause();
-	// Otherwise, advance the sound state.
-	} else {
+		buttonState = RELEASED;
+		buttonTime = (masterTime & 0xffff);
 		soundState = (soundState + 1) % SOUNDSTATES;
+
 	}
 }
 
@@ -324,16 +317,15 @@ void twiddle(void){
 	// if the button has been held down for BUTTON_HOLD_INTERVAL, go to sleep.
 	if (buttonState == PRESSED) {
 		
-		if (time - buttonTime > BUTTON_HOLD_INTERVAL) {
-			GREEN_ON;
+		if ((masterTime & 0xffff) - buttonTime > BUTTON_HOLD_INTERVAL) {
 			appState = SLEEPING;
 			pause();
 		} else { 
-			//GREEN_OFF;
+			//GREEN_OFF();
 		}
 	} else {
-		//RED_OFF;
-		//GREEN_OFF;
+		//RED_OFF();
+		//GREEN_OFF();
 	}
 
 }
@@ -361,7 +353,7 @@ void pause(void) {
 	PORTA &= ~(_BV(BUZZER_PIN0) | _BV(BUZZER_PIN0));
 	
 	// power down some pins?
-	//RED_OFF; GREEN_OFF; BLUE_OFF;
+	//RED_OFF(); GREEN_OFF(); BLUE_OFF();
 	
 	// Enable watchdog timer interrupt mode
 	WDT_ENABLE();
@@ -371,14 +363,17 @@ void pause(void) {
 	sleep_enable();		// enable sleep
 	sei(); 						// Allows watchdog interrupt to happen. (?)
 
+	// sleep with the lights on?	
+	BLUE_ON();
 	sleep_cpu();			// sleep because we pressed the button.
 
 	// WAKEUP EXECUTION RESUMES HERE!
 }
 
-void resume(void){
+inline void resume(void){
 
 	cli();
+	BLUE_OFF();
 	sleep_disable();
 	
 	// disable watchdog
@@ -428,50 +423,48 @@ void setupWatchdog(void){
 #define WDT_vect_num  4
 #define WDT_vect      _VECTOR(4)  /* Watchdog Time-out */
 
+
+register uint8_t buttonPinState asm ("r5");
+
+//ISR(WDT_vect, ISR_NAKED) {
 ISR(WDT_vect) {
-	static uint8_t buttonPinState = 0;
 	
 	buttonPinState = (buttonPinState <<1) | ( BUTTON_PRESSED ? 1 : 0 ) | WDT_DEBOUNCE_MASK;
 
 	if (buttonState == PRESSED && (buttonPinState == WDT_DEBOUNCE_RELEASED)) {
-		buttonState = OFF;
-	} else if (buttonState == OFF && (buttonPinState == WDT_DEBOUNCE_PRESSED)) { 
+		buttonState = RELEASED;
+	} else if (buttonState == RELEASED && (buttonPinState == WDT_DEBOUNCE_PRESSED)) { 
 		// Wake from sleep!
 		appState = PLAYING;
 		// Do the rest:
 		resume();
 	}
 
-	// Re-enable interrupt mode with every ISR call, or we turn into a reset.
-	// The Magic Watchdog Configuration Change Happy Dance ...
-	cli();
-	WDT_RESET();
-	bit_clear(MCUSR, _BV(WDRF));
-	bit_set(WDTCSR, _BV(WDCE) | _BV(WDE));
-	WDTCSR = (WDTCSR | _BV(WDIE)) & ~_BV(WDE); // interrupt on, reset off
-	sei();
-	
 }
 
 
 void main(void){
-	static uint16_t lastTime;
-	uint16_t t;  // local register/nonvolatile version, for faster math (we hope)
+	static uint8_t lastTime;
+	uint8_t t8;  
+
+	timeBits = 0;
+	buttonPinState = 0;
+	appState = 0;
 
 	cli();
 	setup();
 	sei();
 	for(;;){
-		t = time;
+		t8 = masterTime; // we only need the low byte
 
 		// Check for clock ticks; if the clock has moved, generate a sample.
-		if (lastTime != t) {
+		if (lastTime != t8) {
 			genSample();
-			lastTime = t;
+			lastTime = t8;
 
 			// Sample the button every 4 ms == every 32 ticks of T 
-			if ((t & 64) == 64) {
-				sampleButton();
+			if ((t8 & 64) == 64) {
+				sampleButton(); // we only need the low byte
 			}
 
 		}
