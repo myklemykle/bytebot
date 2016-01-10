@@ -174,40 +174,6 @@ void genSample(){
 	if (t>>6 & value>>5 & 1) { BLUE_FLIP() ;}
 }
 
-////////////////////////
-// 
-// Setup/initialization at boot:
-//
-inline void setup(void) {
-	// Set CPU prescaling (two steps)
-	// 1: clock prescaler change enable!  (this bit on, all other bits to 0)
-	CLKPR = _BV(CLKPCE);
-	// 2: actually change the clock prescale value
-	//CLKPR = _BV(CLKPS1); // /4 (2mhz)
-	// CLKPR = _BV(CLKPS0); // /2 (4mhz)
-	CLKPR = 0; // /0 (8mhz)
-
-	// configure main clock
-	setupTimer1();
-
-	// configure watchdog for sleep/wake
-	setupWatchdog();
-
-	// set pinMode to output (1) on these pins, and to input (0) on the rest of port A (including BUTTON_PIN):
-	DDRA = _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
-		| _BV(BUZZER_PIN0) | _BV(BUZZER_PIN1)
-		; 
-
-	// Enable pull-up resistor on the button pin:
-	PORTA = _BV(BUTTON_PIN);
-
-	// Initialize soundState reg:
-	soundState = INIT_SOUNDSTATE;
-
-	// calibrate CPU clock. (trial and error and ear.)
-	OSCCAL = 0x31;
-}
-
 ////////////////////////////////
 //
 // Timer1 configuration at boot:
@@ -321,7 +287,7 @@ void twiddle(void){
 		
 		if ((masterTime & 0xffff) - buttonTime > BUTTON_HOLD_INTERVAL) {
 			appState = SLEEPING;
-			pause();
+			sleep();
 		} else { 
 			//GREEN_OFF();
 		}
@@ -341,11 +307,10 @@ void twiddle(void){
 #define WDT_DISABLE() WDTCSR &= ~_BV(WDIE)
 #define WDT_RESET() __asm__ __volatile__ ("wdr")
 
-// pause() is called at sleep.  It turns off everything that we can turn off & puts us in a coma,
+// sleep() is called at sleep.  It turns off everything that we can turn off & puts us in a coma,
 // to be wakened someday by a watchdog interrupt.
-// resume() is called at wakeup, and un-does whatever pause() did.
 //
-void pause(void) {
+void sleep(void) {
 	cli();
 
 	// disable timer1
@@ -354,7 +319,7 @@ void pause(void) {
 	// set both buzzer pins low.
 	PORTA &= ~(_BV(BUZZER_PIN0) | _BV(BUZZER_PIN0));
 	
-	// power down some pins?
+	// power down LEDs.
 	RED_OFF(); GREEN_OFF(); BLUE_OFF();
 	
 	// Enable watchdog timer interrupt mode
@@ -371,7 +336,8 @@ void pause(void) {
 	// WAKEUP EXECUTION RESUMES HERE!
 }
 
-inline void resume(void){
+// wake() is called at wakeup, and un-does whatever sleep() did.
+void wake(void){
 
 	cli();
 	sleep_disable();
@@ -387,8 +353,17 @@ inline void resume(void){
 	sei();
 }
 
+// idle() is called when we're waiting for the next clock tick.  It
+// just turns off the CPU until an interrupt happens.  Mild power savings.
 
-// Configure the watchdog timer at startup -- but don't turn it on yet.
+void idle(void){
+	set_sleep_mode(SLEEP_MODE_IDLE);
+	sleep_enable();		
+	sleep_cpu();
+}
+
+// We'll use the watchdog timer to wake us from sleep.
+// Configure it at startup, but don't turn it on yet.
 void setupWatchdog(void){
 	uint8_t state = 0;
 	// Watchdog should be disabled by default, but just to be sure: disable watchdog. (WDE == 0, WDIE == 0)
@@ -411,22 +386,20 @@ void setupWatchdog(void){
 // This ISR is polled by the watchdog when we're sleeping.  
 // It wakes us back up once the button has been released and then re-pressed.
 // It uses a simplified version of the button debounce function that
-// we use when awake: it's called less often, watches fewer bits & detects only
+// we use when awake: it's called less often, watches fewer bits.
 //
 // This determines how many bits of the result we care about (13); we OR it to set all the other bits to 1.
 #define WDT_DEBOUNCE_MASK     0b11100000
 #define WDT_DEBOUNCE_PRESSED  0b11110000
 #define WDT_DEBOUNCE_RELEASED 0b11101111
 
-// TODO: why aren't i getting this from io.h????
-// 
+// Q: why aren't i getting these two #defines via io.h????  Some avr-gcc header bug?  or not including something?  dunno.
+// At any rate, the datasheet says it's vector 4 for attiny24a, and that works!
 #define WDT_vect_num  4
 #define WDT_vect      _VECTOR(4)  /* Watchdog Time-out */
 
-
 register uint8_t buttonPinState asm ("r5");
 
-//ISR(WDT_vect, ISR_NAKED) {
 ISR(WDT_vect) {
 	
 	buttonPinState = (buttonPinState <<1) | ( BUTTON_PRESSED ? 1 : 0 ) | WDT_DEBOUNCE_MASK;
@@ -437,25 +410,70 @@ ISR(WDT_vect) {
 		// Wake from sleep!
 		appState = PLAYING;
 		// Do the rest:
-		resume();
+		wake();
 	}
 
 }
 
+////////////////////////
+// 
+// Setup/initialization at boot:
+//
+inline void setup(void) {
 
-void main(void){
-	static uint8_t lastTime;
-	uint8_t t8;  
+	// Conserve battery:
+	// Turn off the ADC, we don't use it.
+	ADCSRA &= ~_BV(ADEN);
+	// Cut all power to ADC, timer0 & serial port
+	PRR |= _BV(PRADC) | _BV(PRTIM0) | _BV(PRUSI); // 1 == disabled in this register
+	// I believe the BOD is still turned off (off by default on new chips)
+	// With the BOD, ADC and comparator are off, the internal referernce voltage should be off too.
 
+	// Set CPU prescaling (two steps):
+	// 1: clock prescaler change enable!  (this bit on, all other bits to 0)
+	CLKPR = _BV(CLKPCE);
+	// 2: actually change the clock prescale value
+	CLKPR = 0; // /0 (8mhz)
+
+	// configure main clock:
+	setupTimer1();
+
+	// configure watchdog for sleep/wake:
+	setupWatchdog();
+
+	// set pinMode to output (1) on these pins, and to input (0) on the rest of port A (including BUTTON_PIN):
+	DDRA = _BV(LED_R_PIN) | _BV(LED_G_PIN) | _BV(LED_B_PIN)
+		| _BV(BUZZER_PIN0) | _BV(BUZZER_PIN1)
+		; 
+
+	// Enable pull-up resistor on the button pin:
+	PORTA = _BV(BUTTON_PIN);
+
+	// Initialize registers: 
+	// TODO: these could all be one register!  smaller code?  we'd have to try it.
+	soundState = INIT_SOUNDSTATE;
 	timeBits = 0;
 	buttonPinState = 0;
 	appState = 0;
+
+	// calibrate CPU clock. (trial and error and ear.)
+	OSCCAL = 0x31;
+}
+
+
+/////////////////////////////
+// All together now:
+// Configure hardware & then loop forever computing samples when needed.
+// 
+void main(void){
+	static uint8_t lastTime;
+	uint8_t t8;  
 
 	cli();
 	setup();
 	sei();
 	for(;;){
-		t8 = masterTime; // we only need the low byte
+		t8 = masterTime; // we only need to look at the low byte here.
 
 		// Check for clock ticks; if the clock has moved, generate a sample.
 		if (lastTime != t8) {
@@ -467,12 +485,12 @@ void main(void){
 				sampleButton(); // we only need the low byte
 			}
 
+			// Time the button press events:
+			twiddle();
+
 		}
-
-		// Time the button press:
-		twiddle();
-
-		// TODO: save power until the next tick?
+		// Save power until the next clock tick.
+		idle();
 	}
 }
 
