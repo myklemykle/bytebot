@@ -36,6 +36,9 @@
 #define RED_OFF()	PORTA &= ~_BV(LED_R_PIN)
 #define GREEN_OFF()	PORTA &= ~_BV(LED_G_PIN)
 #define BLUE_OFF()	PORTA &= ~_BV(LED_B_PIN)
+#define RED_FLIP()	PORTA ^= _BV(LED_R_PIN)
+#define GREEN_FLIP()	PORTA ^= _BV(LED_G_PIN)
+#define BLUE_FLIP()	PORTA ^= _BV(LED_B_PIN)
 
 // Handy bit macros from http://www.avrfreaks.net/comment/26024#comment-26024 :
 #define bit_get(p,m) ((p) & (m))
@@ -163,6 +166,12 @@ void genSample(){
 	
 	// adjust the pulse width of the timer1 PWM generator to generate the new sample as PWM volts:
 	OCR1AL = value;
+
+	// twinkle:
+	// this was my first random guess at something & looks prettier than all subsequent refinements i tried. =)
+	if (t>>4 & value>>7 & 1) { RED_FLIP() ;}
+	if (t>>5 & value>>6 & 1) { GREEN_FLIP() ;}
+	if (t>>6 & value>>5 & 1) { BLUE_FLIP() ;}
 }
 
 ////////////////////////
@@ -346,7 +355,7 @@ void pause(void) {
 	PORTA &= ~(_BV(BUZZER_PIN0) | _BV(BUZZER_PIN0));
 	
 	// power down some pins?
-	//RED_OFF(); GREEN_OFF(); BLUE_OFF();
+	RED_OFF(); GREEN_OFF(); BLUE_OFF();
 	
 	// Enable watchdog timer interrupt mode
 	WDT_ENABLE();
@@ -357,7 +366,6 @@ void pause(void) {
 	sei(); 						// Allows watchdog interrupt to happen. (?)
 
 	// sleep with the lights on?	
-	BLUE_ON();
 	sleep_cpu();			// sleep because we pressed the button.
 
 	// WAKEUP EXECUTION RESUMES HERE!
@@ -366,7 +374,6 @@ void pause(void) {
 inline void resume(void){
 
 	cli();
-	BLUE_OFF();
 	sleep_disable();
 	
 	// disable watchdog
