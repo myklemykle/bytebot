@@ -190,6 +190,7 @@ CFLAGS += -ffunction-sections
 CFLAGS += -fno-inline-small-functions
 CFLAGS += -fpack-struct
 CFLAGS += -fshort-enums
+CFLAGS += -fwhole-program
 CFLAGS += -Wall
 CFLAGS += -Wstrict-prototypes
 CFLAGS += -Wundef
