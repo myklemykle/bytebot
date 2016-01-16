@@ -10,16 +10,22 @@
 // Audio code adapted from Michael Smith's PCM Audio sketch on the Arduino Playground.
 //
 // 2015/2016 -mykle hansen-
+//
+// TOC:
+//
+// 1) Global config
+// 2) Time Management
+// 3) Music Generation
 
+//////////////////////////////////
+// 1) Global config
+//
 #include <stdint.h>
 #include <stdbool.h>
 #include <avr/interrupt.h>
 #include <avr/io.h>
 #include <avr/sleep.h>
 #include <avr/wdt.h>
-
-// General config settings:
-#define SAMPLE_RATE 8000  // hertz (each one is 1/8 ms)
 
 // Which pins do what?
 #define LED_R_PIN PINA4
@@ -40,7 +46,7 @@
 #define GREEN_FLIP()	PORTA ^= _BV(LED_G_PIN)
 #define BLUE_FLIP()	PORTA ^= _BV(LED_B_PIN)
 
-// Handy bit macros from http://www.avrfreaks.net/comment/26024#comment-26024 :
+// Here are some handy bit macros from http://www.avrfreaks.net/comment/26024#comment-26024 :
 #define bit_get(p,m) ((p) & (m))
 #define bit_set(p,m) ((p) |= (m))
 #define bit_clear(p,m) ((p) &= ~(m))
@@ -48,18 +54,17 @@
 #define bit_write(c,p,m) (c ? bit_set(p,m) : bit_clear(p,m))
 
 // States our application can be in:
-//  PLAYING: startup finished, playing a scene.
-//  SLEEPING: low-power hibernation, waiting to be woken by a button press.
+// PLAYING: startup finished, playing a scene.
+// SLEEPING: low-power hibernation, waiting to be woken by a button press.
 
 #define PLAYING 0
 #define SLEEPING 1
 register uint8_t appState asm("r17");
-//enum AppStates { PWROFF, STARTING, PLAYING, CHANGING, SLEEPING, ASLEEP };
-//static enum AppStates appState = PLAYING;
+
 
 ///////////////////////////////
 //
-// Time management:
+// 2) Time management:
 // This is our master clock, 'time', incremented at 8khz by the ISR below.  We output one sample for every increment.
 //
 uint32_t masterTime = 0; 
@@ -84,28 +89,33 @@ ISR(TIM1_OVF_vect) {
 }
 
 /////////////////////////
-// Bytebeat stuff:
+//
+// 3) Music Generation
 //
 // Bytebeat is a genre of simple algorthims that convert time (t) into an audio sample.
 //
-// Total number of bytebeat recipes in our tiny brain:
+// How many bytebeat recipes in our tiny brain:
 #define SOUNDSTATES 8
 //
-// The recipe we play at power-on:
-#define INIT_SOUNDSTATE 0;
+// The one we play at power-on:
+#define INIT_SOUNDSTATE 5;
 //
 // The currently selected recipe:
 // (I'm making it a register 'cuz there's a sale on registers ... )
 register uint8_t soundState asm ("r4");
+
 //
-// genSample is called at 8khz, to produce an audio sample as a (simple) function of time
-// via the currently selected recipe.
+// genSample() is called at 8khz, to produce an audio sample as a (simple) function of masterTime
+// using the currently selected recipe in soundState
 register uint8_t value asm ("r6");
 
 void genSample(){
 	uint32_t t = masterTime;  // local register/nonvolatile version, for faster math (we hope)
 
 	// memory savings: precompute some constants that appear in many different formulae:
+	
+	uint32_t tx3 = t + t + t;
+	uint32_t trr6  = t>>6;  
 	uint32_t trr7  = t>>7;  
 	uint32_t trr8  = t>>8;  
 	uint32_t trr11 = t>>11;  
@@ -113,50 +123,39 @@ void genSample(){
 
 	switch (soundState) {
 		case 0: 
+			//value = ((t >> 10) & 42) * t;
 			value = ((t >> 10) & 42) * t;
 			// How it's supposed to sound: http://greggman.com/downloads/examples/html5bytebeat/html5bytebeat.html
 			break;
 		case 1:
-			//value = t*(t>>11&t>>8&123&t>>3);  
+			//value = t*(trr11&trr8&123&t>>3);  
 			value = t*(trr11&trr8 & 0b01100011 &t>>3);  // 0b01100011 is a little less hectic than 123
 			break;
 		case 2:
-			//value = t*5&(trr7)|t*3&(t*4>>10); /// very xmassy!  kind of sweet.
-			value = (t*5&(trr7)) | (t*3&(trr8)); /// t*4>>10 and trr8 should be the same thing ...
+			//value = t*5&(trr7)|tx3&(t*4>>10); /// very xmassy!  kind of sweet.
+			value = (t*5&(trr7)) | (tx3&(trr8)); /// t*4>>10 and trr8 should be the same thing ...
 			break;
 		case 3:
-			//value = (trr7|t|t>>6)*10+ (4*(t*t>>13|t>>6) ); // disco techno?
-			value = (trr7|t|t>>6)*10 + ((t*trr13|t>>6)<<2 ); // x << 2 and x * 4 should be the same thing ...
+			//value = (trr7|t|trr6)*10+ (4*(t*t>>13|trr6) ); // disco techno?
+			value = (trr7|t|trr6)*10 + ((t*trr13|trr6)<<2 ); // x << 2 and x * 4 should be the same thing ...
 			break;
 		case 4:
 			// value = ((t*("36364689"[t>>13&7]&15))/12&128) + (((((t>>12)^(t>>12)-2)%11*t)/4|t>>13)&127); // designed for 44khz
 			value = ( ((t*("36364689"[trr11&7]&15))/12&128)  + (( (((t>>9)^(t>>9)-2)%11*t) >>2|trr13)&127) ) << 2; // 8khz version
 			break;
-		case 5:
-			value = ( 0xFEFE % ( t>>9 | 11 ) & t ) ;
+		case 5: // too slow to go?
+			value = tx3 & (t/12>>8|t%3)%24 | (trr8)&19  | (trr8)&19 >> (t&((t>>1)>>11)%63) >> (tx3&(trr7&t + t<<11));
 			break;
 		case 6:
 			value = ((t<<1)^((t<<1)+(trr7)&t>>12))|t>>(4-(1&(t>>19)))|trr7;
 			break;
 		case 7:
-			 value = t*6&((trr8|t<<4)) ^ t*4&((trr7|t<<3)) ^ t*2&((t>>6|t<<2));
+			 value = t*6&((trr8|t<<4)) ^ t*4&((trr7|t<<3)) ^ t*2&((trr6|t<<2));
+			 break;
+		case 8:
+			 value = ((t<<2^trr6)*2 + (t<<3^trr7)) * ("11121114"[(t>>15)&7]-48);
 			 break;
 			 /*
-		case 8:
-			 value = (t<<3 ); // 8khz.
-			 break;
-		case 9:
-			 value = (t<<4 ); // 8khz.
-			 break;
-		case 10:
-			 value = (t<<5 ); // 8khz.
-			 break;
-		case 11:
-			 value = (t<<6 ); // 8khz.
-			 break;
-		case 12:
-			 value = (t<<7 ); // 8khz.
-			 break;
 			 // Can't do this one without an exponent operator:
 		case 13:
 			 value = ( (t*(1.059 ^ (1 + (t>>12 & 11)) )<<( 1 + (t>>14 & 3))) * ( (t >> 10 & t>>13 | t >> 9) & 1) & 128) *1.99;
@@ -171,7 +170,7 @@ void genSample(){
 	// this was my first random guess at something & looks prettier than all subsequent refinements i tried. =)
 	if (t>>4 & value>>7 & 1) { RED_FLIP() ;}
 	if (t>>5 & value>>6 & 1) { GREEN_FLIP() ;}
-	if (t>>6 & value>>5 & 1) { BLUE_FLIP() ;}
+	if (trr6 & value>>5 & 1) { BLUE_FLIP() ;}
 }
 
 ////////////////////////////////
@@ -227,7 +226,7 @@ inline void setupTimer1(void){
 // Normal press & release advances the sound state
 // Holding down for longer that BUTTON_HOLD_INTERVAL puts us to sleep,
 // and the next press wakes us up again.
-#define BUTTON_HOLD_INTERVAL SAMPLE_RATE 		// minimum hold-down time: 1 sec
+#define BUTTON_HOLD_INTERVAL 8000 // minimum hold-down time: 1 sec
 
 // the button is pressed if bit BUTTON_PIN of register PINA is 1
 #define BUTTON_PRESSED (PINA & _BV(BUTTON_PIN))
