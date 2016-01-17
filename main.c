@@ -143,8 +143,8 @@ void genSample(){
 			// value = ((t*("36364689"[t>>13&7]&15))/12&128) + (((((t>>12)^(t>>12)-2)%11*t)/4|t>>13)&127); // designed for 44khz
 			value = ( ((t*("36364689"[trr11&7]&15))/12&128)  + (( (((t>>9)^(t>>9)-2)%11*t) >>2|trr13)&127) ) << 2; // 8khz version
 			break;
-		case 5: // too slow to go?
-			value = tx3 & (t/12>>8|t%3)%24 | (trr8)&19  | (trr8)&19 >> (t&((t>>1)>>11)%63) >> (tx3&(trr7&t + t<<11));
+		case 5: 
+			value = ((t<<2^trr6)*2 + (t<<3^trr7)) * ("11121114"[(t>>15)&7]-48);
 			break;
 		case 6:
 			value = ((t<<1)^((t<<1)+(trr7)&t>>12))|t>>(4-(1&(t>>19)))|trr7;
@@ -152,10 +152,10 @@ void genSample(){
 		case 7:
 			 value = t*6&((trr8|t<<4)) ^ t*4&((trr7|t<<3)) ^ t*2&((trr6|t<<2));
 			 break;
-		case 8:
-			 value = ((t<<2^trr6)*2 + (t<<3^trr7)) * ("11121114"[(t>>15)&7]-48);
-			 break;
 			 /*
+		case 8: /// too slow?
+			value = tx3 & (t/12>>8|t%3)%24 | (trr8)&19  | (trr8)&19 >> (t&((t>>1)>>11)%63) >> (tx3&(trr7&t + t<<11));
+			 break;
 			 // Can't do this one without an exponent operator:
 		case 13:
 			 value = ( (t*(1.059 ^ (1 + (t>>12 & 11)) )<<( 1 + (t>>14 & 3))) * ( (t >> 10 & t>>13 | t >> 9) & 1) & 128) *1.99;
