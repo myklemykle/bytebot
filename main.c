@@ -11,11 +11,19 @@
 //
 // 2015/2016 -mykle hansen-
 //
+// TODO:
+// * further optimizations with registers (combine all flags in one reg?) might free up a bit more RAM for another song or two.
+// * use a bytebeat interpreter, instead of compiling individual lines of bytebeat, to fit many more songs.
+// * implement tuning, via some magic button-pressing handshake right at startup, so robots can sing in tune together.
+//
 // TOC:
 //
 // 1) Global config
-// 2) Time Management
-// 3) Music Generation
+// 2) Time management
+// 3) Music generation
+// 4) Button management
+// 5) Setup & main loop
+
 
 //////////////////////////////////
 // 1) Global config
@@ -63,8 +71,8 @@ register uint8_t appState asm("r17");
 
 
 ///////////////////////////////
-//
 // 2) Time management:
+//
 // This is our master clock, 'time', incremented at 8khz by the ISR below.  We output one sample for every increment.
 //
 uint32_t masterTime = 0; 
@@ -88,27 +96,75 @@ ISR(TIM1_OVF_vect) {
 	timeBits++;
 }
 
-/////////////////////////
+////////////////////////////////
+// Timer1 configuration at boot:
 //
+// Set up Timer 1 to do PWM audio on the speaker pin. 
+// The balloon board has a piezo btwn pins 7 & 8 (OC1A & OC1B)
+// instead of a pin & ground, so we set up two inverse PWM signals
+// on those two pins.
+// Also trigger an intererupt on overflow, to drive our clock.
+//
+inline void setupTimer1(void){
+	// Set fast PWM mode
+	// WGM0[3:0] = 0101
+	TCCR1A = (TCCR1A | _BV(WGM10)) &  ~_BV(WGM11);
+	TCCR1B = (TCCR1B | _BV(WGM12)) & ~_BV(WGM13);
+
+	// 9-bit fast PWM mode: WGM0* = 0110
+	//TCCR1A = (TCCR1A | _BV(WGM11)) &  ~_BV(WGM10);
+	//TCCR1B = (TCCR1B | _BV(WGM12)) & ~_BV(WGM13);
+	//
+	// 10-bit fast PWM mode: WGM0* = 0111
+	// TCCR1A |= (_BV(WGM11) | _BV(WGM10));
+	// TCCR1B = (TCCR1B | _BV(WGM12)) & ~_BV(WGM13);
+
+	// Do non-inverting PWM on pin OC1A:
+	// COM1A* = 10 == clear OC1A on match, set on bottom.
+	TCCR1A = (TCCR1A | _BV(COM1A1)) & ~_BV(COM1A0);
+
+	// Do the complement on pin OC1B:
+	// COM1B* = 11 == set OC1B on match, clear on bottom.
+	TCCR1A |= _BV(COM1B1) | _BV(COM1B0);
+
+	// CS1* = 001 == no prescaler.
+	TCCR1B = (TCCR1B & ~(_BV(CS12) | _BV(CS11))) | _BV(CS10);
+
+	// " The FOC1A/FOC1B bits are only active when the WGM1[3:0] bits specifies a non-PWM mode. 
+	// However, for ensuring compatibility with future devices, these bits must be set to zero 
+	// when TCCR1A is written when operating in a PWM mode."
+	// ... okay whatever dude.
+	TCCR1C = 0;
+
+	OCR1AH = 0; // clear the top 8 bits of this register & never touch them again.
+
+	// Enable interrupt on TIMER1 overflow
+	bit_set(TIMSK1, _BV(TOIE1));
+}
+
+/////////////////////////
 // 3) Music Generation
 //
 // Bytebeat is a genre of simple algorthims that convert time (t) into an audio sample.
 //
 // How many bytebeat recipes in our tiny brain:
+//
 #define SOUNDSTATES 8
 //
 // The one we play at power-on:
+//
 #define INIT_SOUNDSTATE 5;
 //
 // The currently selected recipe:
 // (I'm making it a register 'cuz there's a sale on registers ... )
+//
 register uint8_t soundState asm ("r4");
 
 //
 // genSample() is called at 8khz, to produce an audio sample as a (simple) function of masterTime
 // using the currently selected recipe in soundState
+//
 register uint8_t value asm ("r6");
-
 void genSample(){
 	uint32_t t = masterTime;  // local register/nonvolatile version, for faster math (we hope)
 
@@ -173,82 +229,41 @@ void genSample(){
 	if (trr6 & value>>5 & 1) { BLUE_FLIP() ;}
 }
 
-////////////////////////////////
-//
-// Timer1 configuration at boot:
-//
-// Set up Timer 1 to do PWM audio on the speaker pin. 
-// The balloon board has a piezo btwn pins 7 & 8 (OC1A & OC1B)
-// instead of a pin & ground, so we set up two inverse PWM signals
-// on those two pins.
-// Also trigger an intererupt on overflow, to drive our clock.
-inline void setupTimer1(void){
-	// Set fast PWM mode
-	// WGM0[3:0] = 0101
-	TCCR1A = (TCCR1A | _BV(WGM10)) &  ~_BV(WGM11);
-	TCCR1B = (TCCR1B | _BV(WGM12)) & ~_BV(WGM13);
-
-	// 9-bit fast PWM mode: WGM0* = 0110
-	//TCCR1A = (TCCR1A | _BV(WGM11)) &  ~_BV(WGM10);
-	//TCCR1B = (TCCR1B | _BV(WGM12)) & ~_BV(WGM13);
-	//
-	// 10-bit fast PWM mode: WGM0* = 0111
-	// TCCR1A |= (_BV(WGM11) | _BV(WGM10));
-	// TCCR1B = (TCCR1B | _BV(WGM12)) & ~_BV(WGM13);
-
-	// Do non-inverting PWM on pin OC1A:
-	// COM1A* = 10 == clear OC1A on match, set on bottom.
-	TCCR1A = (TCCR1A | _BV(COM1A1)) & ~_BV(COM1A0);
-
-	// Do the complement on pin OC1B:
-	// COM1B* = 11 == set OC1B on match, clear on bottom.
-	TCCR1A |= _BV(COM1B1) | _BV(COM1B0);
-
-	// CS1* = 001 == no prescaler.
-	TCCR1B = (TCCR1B & ~(_BV(CS12) | _BV(CS11))) | _BV(CS10);
-
-	// " The FOC1A/FOC1B bits are only active when the WGM1[3:0] bits specifies a non-PWM mode. 
-	// However, for ensuring compatibility with future devices, these bits must be set to zero 
-	// when TCCR1A is written when operating in a PWM mode."
-	// ... okay whatever dude.
-	TCCR1C = 0;
-
-	OCR1AH = 0; // clear the top 8 bits of this register & never touch them again.
-
-	// Enable interrupt on TIMER1 overflow
-	bit_set(TIMSK1, _BV(TOIE1));
-}
-
 
 ///////////////////////////////////////
-//
-// Button mgt.  
+// 4) Button mgt.  
 // Normal press & release advances the sound state
 // Holding down for longer that BUTTON_HOLD_INTERVAL puts us to sleep,
 // and the next press wakes us up again.
+//
 #define BUTTON_HOLD_INTERVAL 8000 // minimum hold-down time: 1 sec
 
 // the button is pressed if bit BUTTON_PIN of register PINA is 1
+//
 #define BUTTON_PRESSED (PINA & _BV(BUTTON_PIN))
 
 // the states the button can be in:
+//
 enum ButtonStates { RELEASED, PRESSED };
 static enum ButtonStates buttonState = RELEASED;
 
 // How long has the button been in its current state?
+//
 static uint16_t buttonTime = 0;
 
 //
 // Debounce the button.
 //
-// Bit-shift debounce algorithm from this enjoyable, nerdy article: 
+// This clever bit-shift debounce algorithm comes from this enjoyable, nerdy article: 
 // http://www.eng.utah.edu/~cs5780/debouncing.pdf -- A Guide To Debouncing, by Jack Ganssle
 // Basically we don't believe the button until it says the same thing N times in a row.  Here, N = 12.
 //
 // This masks how many bits of the result we care about (13); we OR it to set all the other bits to 1.
 #define DEBOUNCE_MASK     0b1110000000000000
+
 // This is the value that represents a debounced "down"/"closed"/"pressed" state: 12 consecutive zeroes after a one
 #define DEBOUNCE_PRESSED  0b1111000000000000
+
 // This is the value that represents a debounced "up" state: 12 consecutive ones after a zero
 #define DEBOUNCE_RELEASED 0b1110111111111111
 
@@ -298,10 +313,10 @@ void twiddle(void){
 }
 
 ///////////////////////////////
-//
-// Power Mgt: 
+// 5) Power Mgt: 
 //
 // Watchdog timer macros:
+//
 #define WDT_ENABLE() WDTCSR |= _BV(WDIE)
 #define WDT_DISABLE() WDTCSR &= ~_BV(WDIE)
 #define WDT_RESET() __asm__ __volatile__ ("wdr")
@@ -416,7 +431,7 @@ ISR(WDT_vect) {
 
 ////////////////////////
 // 
-// Setup/initialization at boot:
+// 6) Setup and main loop:
 //
 inline void setup(void) {
 
@@ -468,9 +483,12 @@ void main(void){
 	static uint8_t lastTime;
 	uint8_t t8;  
 
+	// Configure hardware:
 	cli();
 	setup();
 	sei();
+
+	// Loop forever:
 	for(;;){
 		t8 = masterTime; // we only need to look at the low byte here.
 
