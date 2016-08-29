@@ -302,12 +302,7 @@ void twiddle(void){
 		if ((masterTime & 0xffff) - buttonTime > BUTTON_HOLD_INTERVAL) {
 			appState = SLEEPING;
 			sleep();
-		} else { 
-			//GREEN_OFF();
 		}
-	} else {
-		//RED_OFF();
-		//GREEN_OFF();
 	}
 
 }
